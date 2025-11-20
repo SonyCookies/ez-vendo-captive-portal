@@ -7,7 +7,7 @@ import {
   CheckCircle,
   Info,
 } from "lucide-react"; // Imported new icons
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation"; // For redirection and URL params
 import Link from "next/link";
 import { db } from "@/app/config/firebase";
@@ -20,13 +20,27 @@ const validateEmail = (email) => {
 
 // Simple password hashing function (for demo - use bcrypt/argon2 in production)
 const hashPassword = async (password) => {
-  // Using Web Crypto API for hashing
-  const encoder = new TextEncoder();
-  const data = encoder.encode(password);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  return hashHex;
+  // Check if crypto.subtle is available (only in secure contexts - HTTPS)
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    // Using Web Crypto API for hashing
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex;
+  } else {
+    // Fallback for development/insecure contexts (HTTP)
+    // Simple hash function (NOT secure - use proper hashing in production)
+    let hash = 0;
+    for (let i = 0; i < password.length; i++) {
+      const char = password.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    // Convert to hex and pad
+    return Math.abs(hash).toString(16).padStart(8, '0') + '_dev';
+  }
 };
 
 // --- Timer Constants ---
@@ -39,6 +53,9 @@ export default function Register() {
   // Get RFID and attempt from URL parameters
   const rfidFromUrl = searchParams.get("rfid");
   const attemptFromUrl = searchParams.get("attempt");
+  
+  // --- Actual Attempts from Firestore (prevents URL manipulation) ---
+  const [actualAttempts, setActualAttempts] = useState(parseInt(attemptFromUrl) || 1);
 
   // --- Timer State ---
   const [timeLeft, setTimeLeft] = useState(REGISTRATION_TIME_LIMIT_SECONDS);
@@ -62,6 +79,9 @@ export default function Register() {
   });
   const [showInfoModal, setShowInfoModal] = useState(true); // Show info modal on mount
   const [registrationSuccess, setRegistrationSuccess] = useState(false); // Track successful registration
+  
+  // Use ref to prevent timer from running during redirect (more reliable than state)
+  const isRedirectingRef = useRef(false);
 
   // --- Color Interpolation Logic (Adapted from the modal) ---
   const getColorForCountdown = useCallback(() => {
@@ -98,36 +118,24 @@ export default function Register() {
         if (userSnap.exists()) {
           const userData = userSnap.data();
           
-          // Check if timer was already started
-          if (userData.registrationTimerStart) {
-            // Calculate elapsed time
-            const startTime = userData.registrationTimerStart.toMillis();
-            const now = Date.now();
-            const elapsedSeconds = Math.floor((now - startTime) / 1000);
-            const remaining = REGISTRATION_TIME_LIMIT_SECONDS - elapsedSeconds;
-
-            if (remaining <= 0) {
-              // Time already expired
-              setTimeLeft(0);
-              setGlobalMessage({
-                type: "error",
-                text: "Time limit expired. Redirecting to home...",
-              });
-              setTimeout(() => router.push("/"), 2000);
-            } else {
-              // Set remaining time
-              setTimeLeft(remaining);
-            }
-          } else {
-            // First time on registration page - store start time (with timeout)
-            await Promise.race([
-              updateDoc(userDocRef, {
-                registrationTimerStart: serverTimestamp(),
-              }),
-              timeoutPromise
-            ]);
-            setTimeLeft(REGISTRATION_TIME_LIMIT_SECONDS);
-          }
+          // Set actual attempts from Firestore
+          const attemptsFromFirestore = userData.attempts || 1;
+          setActualAttempts(attemptsFromFirestore);
+          console.log(`📊 Actual attempts from Firestore: ${attemptsFromFirestore}`);
+          
+          // ALWAYS RESET timer to 5 minutes for each new registration attempt
+          // (Don't carry over old expired timers from previous attempts!)
+          console.log("🔄 Resetting timer to 5 minutes for new registration attempt");
+          
+          await Promise.race([
+            setDoc(userDocRef, {
+              registrationTimerStart: serverTimestamp(), // Always update to NOW
+            }, { merge: true }),
+            timeoutPromise
+          ]);
+          
+          setTimeLeft(REGISTRATION_TIME_LIMIT_SECONDS);
+          console.log("✅ Timer set to", REGISTRATION_TIME_LIMIT_SECONDS, "seconds");
         }
         
         setTimerStarted(true);
@@ -144,19 +152,24 @@ export default function Register() {
 
   // --- Timer Countdown Logic ---
   useEffect(() => {
-    // Don't run timer if not started, still loading, submitting, or registration successful
-    if (!timerStarted || timerLoading || isSubmitting || registrationSuccess) return;
+    // Don't run timer if not started, still loading, submitting, registration successful, or redirecting
+    if (!timerStarted || timerLoading || isSubmitting || registrationSuccess || isRedirectingRef.current) return;
 
     if (timeLeft <= 0) {
-      // Timer hit 0: Redirect user (only if registration not successful)
-      if (!registrationSuccess) {
+      // Timer hit 0: Redirect user (only if registration not successful and not redirecting)
+      if (!registrationSuccess && !isRedirectingRef.current) {
+        console.log("⏰ TIMER EXPIRED - Redirecting to home");
         setGlobalMessage({
           type: "error",
           text: "Time limit reached. You will be redirected to the home screen.",
         });
+        isRedirectingRef.current = true; // Prevent further timer triggers
         setTimeout(() => {
+          console.log("🏠 Executing redirect to home page");
           router.push("/"); // Redirect to home page
         }, 2000);
+      } else {
+        console.log("⏰ Timer hit 0 but NOT redirecting (registrationSuccess:", registrationSuccess, ", isRedirecting:", isRedirectingRef.current, ")");
       }
       return;
     }
@@ -256,8 +269,17 @@ export default function Register() {
       return;
     }
 
-    // Submission Logic
+    // Save current time in case we need to restore it
+    const savedTimeLeft = timeLeft;
+
+    // ⚠️ CRITICAL: Stop timer IMMEDIATELY before doing anything else
+    console.log("🛑 STOPPING TIMER - Starting registration process");
+    console.log("   Time left before stop:", timeLeft);
+    isRedirectingRef.current = true; // Set ref FIRST (most reliable)
+    setRegistrationSuccess(true);
+    setTimeLeft(999999);
     setIsSubmitting(true);
+    console.log("   isRedirectingRef set to TRUE");
 
     try {
       // Hash password before storing (simple hash for now - use bcrypt in production)
@@ -295,20 +317,19 @@ export default function Register() {
         
         // Additional metadata
         registrationMethod: "rfid_scan",
-        registrationAttempt: parseInt(attemptFromUrl) || 1,
+        registrationAttempt: actualAttempts,
       };
 
-      // Update the document (it already exists from the scanning attempts)
+      // Create or update the document (handles both new users and users with previous attempts)
       // Remove the timer start field as registration is complete
-      await updateDoc(userDocRef, {
+      await setDoc(userDocRef, {
         ...userData,
         registrationTimerStart: null, // Clear timer
-      });
+      }, { merge: true });
       
       console.log("✅ User registered successfully:", formData.rfid);
-
-      // Mark registration as successful (stops timer from redirecting to home)
-      setRegistrationSuccess(true);
+      console.log("✅ isRedirectingRef is:", isRedirectingRef.current);
+      console.log("✅ registrationSuccess is:", true);
 
       // Show success message
       setGlobalMessage({
@@ -318,13 +339,17 @@ export default function Register() {
 
       // Redirect to dashboard after 2 seconds
       setTimeout(() => {
+        console.log("📊 Executing redirect to dashboard");
         setIsSubmitting(false);
         // Redirect to dashboard with RFID parameter
         router.push(`/dashboard?rfid=${encodeURIComponent(formData.rfid)}`);
       }, 2000);
     } catch (error) {
       console.error("❌ Error registering user:", error);
+      isRedirectingRef.current = false; // Reset ref if registration fails
       setIsSubmitting(false);
+      setRegistrationSuccess(false); // Reset flag if registration fails
+      setTimeLeft(savedTimeLeft); // Restore timer
       setGlobalMessage({
         type: "error",
         text: `Registration failed: ${error.message}`,
@@ -398,13 +423,11 @@ export default function Register() {
             </div>
 
             {/* Current Attempt Counter */}
-            {attemptFromUrl && (
-              <div className="text-center py-2 px-4 bg-gray-100 rounded-lg">
-                <span className="text-sm text-gray-600">
-                  Current Attempt: <span className="font-semibold text-orange-600">{attemptFromUrl} of 3</span>
-                </span>
-              </div>
-            )}
+            <div className="text-center py-2 px-4 bg-gray-100 rounded-lg">
+              <span className="text-sm text-gray-600">
+                Current Attempt: <span className="font-semibold text-orange-600">{actualAttempts} of 3</span>
+              </span>
+            </div>
 
             {/* OK Button */}
             <button
@@ -430,13 +453,13 @@ export default function Register() {
         {/* Dynamic Timer Display */}
         <div className="flex flex-col items-center justify-center gap-2">
           <div className="flex flex-col text-center gap-1">
-            <span className=" text-sm">Time remaining</span>
-            <span className="text-gray-500 text-xs">
-              ( {attemptFromUrl || "1"} out of 3 attempts )
+            <span className="text-sm sm:text-base">Time remaining</span>
+            <span className="text-gray-500 text-xs sm:text-sm">
+              ( {actualAttempts} out of 3 attempts )
             </span>
           </div>
           <span
-            className="text-lg sm:text-xl font-semibold"
+            className="text-3xl sm:text-4xl font-semibold tabular-nums"
             // Apply dynamic color to the timer text
             style={{
               color: getColorForCountdown(),

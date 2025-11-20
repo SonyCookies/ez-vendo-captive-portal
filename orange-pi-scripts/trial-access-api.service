@@ -1,0 +1,18 @@
+[Unit]
+Description=EZ-Vendo Trial Access API
+After=network.target captiveportal.service
+Requires=captiveportal.service
+
+[Service]
+Type=simple
+User=sonny
+WorkingDirectory=/home/sonny
+ExecStart=/usr/bin/python3 /home/sonny/trial_access_api_mac.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
