@@ -54,6 +54,7 @@ export default function Dashboard() {
   const [configLoading, setConfigLoading] = useState(true);
 
   // --- TIME PACKAGE STATE (NEW!) ---
+  const [sessionStartTime, setSessionStartTime] = useState(null); // Timestamp when session actually started
   const [sessionEndTime, setSessionEndTime] = useState(null); // Timestamp when session should end
   const [activeTimeRemaining, setActiveTimeRemaining] = useState(300); // Start with 5-min grace period
   const [hasActiveTime, setHasActiveTime] = useState(true); // Grace period is active by default
@@ -73,6 +74,15 @@ export default function Dashboard() {
   const [showTopUpInstructions, setShowTopUpInstructions] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [showZeroBalanceModal, setShowZeroBalanceModal] = useState(false); // NEW: Show when balance is 0
+  const [showTimeRestoredModal, setShowTimeRestoredModal] = useState(false); // Show when saved time is restored
+  const [restoredTimeSeconds, setRestoredTimeSeconds] = useState(0); // Amount of time restored
+  const [showEndSessionConfirm, setShowEndSessionConfirm] = useState(false); // Show end session confirmation modal
+  const [showEndSessionSuccess, setShowEndSessionSuccess] = useState(false); // Show end session success modal
+  const [showEndSessionError, setShowEndSessionError] = useState(false); // Show end session error modal
+  const [endSessionError, setEndSessionError] = useState(""); // Error message for end session
+  const [savedTimeMinutes, setSavedTimeMinutes] = useState(0); // Amount of time saved (for modal display)
+  const [isEndingSession, setIsEndingSession] = useState(false); // Loading state for ending session
+  const [revokeSuccess, setRevokeSuccess] = useState(false); // Track if revoke was successful
   
   // Top-up Form States
   const [topUpAmount, setTopUpAmount] = useState("");
@@ -161,19 +171,187 @@ export default function Dashboard() {
         ...currentHistory,
       ]);
 
+      // Save session history to session_history collection
+      const actualSessionStartTime = sessionStartTime || new Date(Date.now() - (elapsedSeconds * 1000));
+      const sessionEndTimeDate = new Date();
+      const actualDuration = actualSessionStartTime ? Math.floor((sessionEndTimeDate - actualSessionStartTime) / 1000) : elapsedSeconds;
+      
+      const sessionHistoryData = {
+        userId: rfidFromUrl,
+        userName: userData?.fullName || "Unknown",
+        sessionStartTime: actualSessionStartTime,
+        sessionEndTime: sessionEndTimeDate,
+        durationSeconds: actualDuration,
+        timeRemainingSeconds: 0,
+        timeRemainingMinutes: 0,
+        action: "manually_stopped",
+        savedForNextSession: false,
+        amountDeducted: amountToDeduct,
+        minutesUsed: minutesUsed,
+        timestamp: serverTimestamp(), // For ordering in queries
+        createdAt: serverTimestamp(),
+      };
+      
+      const sessionHistoryRef = await addDoc(collection(db, "session_history"), sessionHistoryData);
+      console.log("✅ Session history saved:", sessionHistoryRef.id);
+
       console.log(`💰 Deducted P${amountToDeduct.toFixed(2)} for ${minutesUsed} minutes`);
     } catch (error) {
       console.error("Error stopping session:", error);
     }
 
-    setIsSessionActive(false);
-    setElapsedSeconds(0); // Reset elapsed time
-    setShowStopConfirm(false);
-    setShowStopSuccess(true); // Show success modal (which redirects after 3s)
+      setIsSessionActive(false);
+      setSessionStartTime(null);
+      setElapsedSeconds(0); // Reset elapsed time
+      setShowStopConfirm(false);
+      setShowStopSuccess(true); // Show success modal (which redirects after 3s)
   };
 
   const handleContinueSession = () => {
     setShowStopConfirm(false); // Close confirmation modal and resume
+  };
+
+  // --- END SESSION HANDLER (Save remaining time) ---
+  const handleEndSession = () => {
+    // Show confirmation modal
+    setShowEndSessionConfirm(true);
+  };
+
+  const confirmEndSession = async () => {
+    if (!hasActiveTime || !sessionEndTime || activeTimeRemaining <= 0) {
+      setShowEndSessionConfirm(false);
+      setEndSessionError("No active session or time remaining to save.");
+      setShowEndSessionError(true);
+      return;
+    }
+
+    setIsEndingSession(true);
+    setRevokeSuccess(false);
+    const timeToSave = activeTimeRemaining;
+    const minutesToSave = Math.floor(timeToSave / 60);
+
+    try {
+      // 1. FIRST: Save remaining time to Firebase (critical - must succeed before revoking access)
+      console.log("💾 Saving remaining time to Firebase...");
+      const userDocRef = doc(db, "users", rfidFromUrl);
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      await updateDoc(userDocRef, {
+        savedRemainingTimeSeconds: timeToSave, // Save remaining seconds
+        savedTimeDate: today, // Save the date when time was saved
+        sessionStartTime: null, // Clear session start time
+        sessionEndTime: null, // Clear active session
+        updatedAt: serverTimestamp(),
+      });
+      
+      console.log(`✅ Saved ${timeToSave} seconds (${minutesToSave} minutes) to Firebase`);
+      
+      // 2. Save session history to session_history collection
+      // Get actual session start time from Firestore if not in state
+      let actualSessionStartTime = null;
+      if (sessionStartTime) {
+        actualSessionStartTime = typeof sessionStartTime === 'number' ? new Date(sessionStartTime) : sessionStartTime;
+      } else {
+        // Try to get from userData, or calculate backwards from sessionEndTime
+        const userDocRef = doc(db, "users", rfidFromUrl);
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists() && userSnap.data().sessionStartTime) {
+          const storedStartTime = userSnap.data().sessionStartTime;
+          actualSessionStartTime = storedStartTime?.toDate ? storedStartTime.toDate() : new Date(storedStartTime);
+        } else if (sessionEndTime && activeTimeRemaining > 0) {
+          // Fallback: Calculate backwards (not ideal but better than nothing)
+          // Assume the total session duration was the purchased time + grace period
+          actualSessionStartTime = new Date(sessionEndTime - ((activeTimeRemaining + Math.floor((Date.now() - sessionEndTime) / 1000)) * 1000));
+        } else {
+          actualSessionStartTime = new Date(Date.now() - 300); // Default to 5 minutes ago
+        }
+      }
+      
+      const sessionEndTimeDate = new Date();
+      const actualDuration = actualSessionStartTime ? Math.floor((sessionEndTimeDate - actualSessionStartTime) / 1000) : 0;
+      
+      console.log("📊 Saving session history:", {
+        startTime: actualSessionStartTime.toISOString(),
+        endTime: sessionEndTimeDate.toISOString(),
+        duration: actualDuration,
+        durationFormatted: `${Math.floor(actualDuration / 60)}:${(actualDuration % 60).toString().padStart(2, '0')}`
+      });
+      
+      const sessionHistoryData = {
+        userId: rfidFromUrl,
+        userName: userData?.fullName || "Unknown",
+        sessionStartTime: actualSessionStartTime,
+        sessionEndTime: sessionEndTimeDate,
+        durationSeconds: actualDuration,
+        timeRemainingSeconds: timeToSave,
+        timeRemainingMinutes: minutesToSave,
+        action: "ended_with_time_saved", // "ended_with_time_saved" or "expired" or "manually_stopped"
+        savedForNextSession: true,
+        savedTimeDate: today,
+        timestamp: serverTimestamp(), // For ordering in queries
+        createdAt: serverTimestamp(),
+      };
+      
+      const sessionHistoryRef = await addDoc(collection(db, "session_history"), sessionHistoryData);
+      console.log("✅ Session history saved:", sessionHistoryRef.id);
+      
+      // 3. THEN: Revoke internet access from Orange Pi (only after successful save)
+      console.log("🔌 Revoking internet access from Orange Pi...");
+      let revokeWorked = false;
+      try {
+        const revokeResponse = await fetch(`http://192.168.1.1:8080/revoke-access`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5000)
+        });
+
+        if (revokeResponse.ok) {
+          const revokeData = await revokeResponse.json();
+          console.log("✅ Internet access revoked:", revokeData);
+          setRevokeSuccess(true);
+          revokeWorked = true;
+        } else {
+          const errorText = await revokeResponse.text();
+          console.warn("⚠️ Failed to revoke access via API:", revokeResponse.status, errorText);
+          setRevokeSuccess(false);
+          // Time is already saved, so this is non-critical - user can manually disconnect
+        }
+      } catch (error) {
+        console.error("⚠️ Error calling revoke API:", error);
+        setRevokeSuccess(false);
+        // Time is already saved, so this is non-critical - user can manually disconnect
+      }
+
+      // 4. Clear local session state
+      setSessionStartTime(null);
+      setSessionEndTime(null);
+      setActiveTimeRemaining(0);
+      setHasActiveTime(false);
+      setIsSessionActive(false);
+      
+      // 5. Clear from sessionStorage
+      sessionStorage.removeItem('ezvendo_active_session');
+      
+      // 6. Show success modal
+      setSavedTimeMinutes(minutesToSave);
+      setShowEndSessionConfirm(false);
+      setShowEndSessionSuccess(true);
+      
+      console.log(`✅ Session ended successfully - ${minutesToSave} minutes saved for next visit`);
+      if (revokeWorked) {
+        console.log("✅ Internet access successfully revoked");
+      } else {
+        console.warn("⚠️ Internet access may still be active (revoke failed, but time saved)");
+        console.log("   User can manually disconnect or try ending session again");
+      }
+    } catch (error) {
+      console.error("Error ending session:", error);
+      setShowEndSessionConfirm(false);
+      setIsEndingSession(false);
+      setEndSessionError(error.message || "Failed to save remaining time. Please try again.");
+      setShowEndSessionError(true);
+    } finally {
+      setIsEndingSession(false);
+    }
   };
 
   // 4. Top-up / Dismissal Handlers
@@ -432,7 +610,12 @@ export default function Dashboard() {
         const data = await response.json();
         console.log("✅ Internet access granted:", data);
         
+        // Set start time if this is a new session, or keep existing if adding time
+        const now = Date.now();
+        const actualStartTime = sessionStartTime || now;
+        
         // Use the pre-calculated newEndTime
+        setSessionStartTime(actualStartTime);
         setSessionEndTime(newEndTime);
         setHasActiveTime(true);
         setIsSessionActive(true);
@@ -440,8 +623,18 @@ export default function Dashboard() {
         // Update session in sessionStorage
         sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
           rfid: rfidFromUrl,
+          sessionStartTime: actualStartTime,
           sessionEndTime: newEndTime
         }));
+        
+        // Also update Firestore with start time if it's a new session
+        if (!sessionStartTime) {
+          const userDocRef = doc(db, "users", rfidFromUrl);
+          await updateDoc(userDocRef, {
+            sessionStartTime: actualStartTime,
+            updatedAt: serverTimestamp(),
+          });
+        }
         console.log("💾 Session updated in storage and Firestore");
         
         const totalMinutes = Math.floor((newEndTime - now) / 60000);
@@ -528,12 +721,15 @@ export default function Dashboard() {
           // Restore existing session if it exists and hasn't expired
           if (data.sessionEndTime && data.sessionEndTime > Date.now()) {
             const existingEndTime = data.sessionEndTime;
+            const existingStartTime = data.sessionStartTime || (existingEndTime ? new Date(existingEndTime - (data.sessionEndTime - data.sessionStartTime || 0)) : new Date());
             const remaining = Math.floor((existingEndTime - Date.now()) / 1000);
             
             console.log("🔄 Restoring existing session from Firestore");
+            console.log("   Start time:", new Date(existingStartTime).toLocaleString());
             console.log("   End time:", new Date(existingEndTime).toLocaleString());
             console.log("   Time remaining:", Math.floor(remaining / 60), "minutes");
             
+            setSessionStartTime(existingStartTime);
             setSessionEndTime(existingEndTime);
             setActiveTimeRemaining(remaining);
             setHasActiveTime(true);
@@ -542,6 +738,7 @@ export default function Dashboard() {
             // Also save to sessionStorage
             sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
               rfid: rfidFromUrl,
+              sessionStartTime: existingStartTime,
               sessionEndTime: existingEndTime
             }));
           }
@@ -556,11 +753,111 @@ export default function Dashboard() {
           const lastGracePeriodDate = data.lastGracePeriodDate || null;
           const canGrantGracePeriod = lastGracePeriodDate !== today;
           
+          // Check for saved remaining time
+          const savedRemainingTime = data.savedRemainingTimeSeconds || 0;
+          const savedTimeDate = data.savedTimeDate || null;
+          const isNewDay = savedTimeDate !== today;
+          
           console.log("✅ Dashboard loaded");
           console.log("ℹ️ Balance: ₱" + currentBalance.toFixed(2));
           console.log("🎁 Grace period eligibility:", canGrantGracePeriod ? "YES (not granted today)" : "NO (already granted today)");
           console.log("📅 Last grace period date:", lastGracePeriodDate || "Never");
           console.log("📅 Today's date:", today);
+          console.log("💾 Saved time:", savedRemainingTime, "seconds");
+          console.log("📅 Saved time date:", savedTimeDate || "Never");
+          console.log("🔄 Is new day:", isNewDay);
+          
+          // Handle saved time restoration (only if no active session)
+          if (savedRemainingTime > 0 && (!data.sessionEndTime || data.sessionEndTime <= Date.now())) {
+            let totalTimeSeconds = 0;
+            let shouldGrantGrace = false;
+            
+            if (isNewDay && canGrantGracePeriod) {
+              // New day + grace period available: Add saved time to grace period
+              totalTimeSeconds = savedRemainingTime + 300; // Saved time + 5 min grace
+              shouldGrantGrace = true;
+              console.log(`🔄 New day + grace available: Adding ${savedRemainingTime}s saved time to 5-min grace period = ${totalTimeSeconds}s total`);
+            } else if (isNewDay && !canGrantGracePeriod) {
+              // New day but grace period already used: Restore saved time only
+              totalTimeSeconds = savedRemainingTime;
+              shouldGrantGrace = false;
+              console.log(`🔄 New day but grace used: Restoring ${savedRemainingTime}s saved time only (no grace added)`);
+            } else if (!isNewDay) {
+              // Same day: Use saved time directly
+              totalTimeSeconds = savedRemainingTime;
+              shouldGrantGrace = false;
+              console.log(`🔄 Same day: Restoring ${savedRemainingTime}s saved time`);
+            }
+            
+            // Only proceed if we have time to restore
+            if (totalTimeSeconds > 0) {
+              try {
+                // Call Orange Pi API with total time
+                const restoreResponse = await fetch(`http://192.168.1.1:8080/grant-time?duration=${totalTimeSeconds}`, {
+                  method: 'GET',
+                  signal: AbortSignal.timeout(5000)
+                });
+                
+                if (restoreResponse.ok) {
+                  const responseData = await restoreResponse.json();
+                  console.log("✅ Saved time restored:", responseData);
+                  
+                  // Calculate start and end time
+                  const now = Date.now();
+                  const startTime = now; // Session starts now
+                  const endTime = now + (totalTimeSeconds * 1000);
+                  
+                  // Update Firestore
+                  const updateData = {
+                    sessionStartTime: startTime, // Store actual start time
+                    sessionEndTime: endTime,
+                    savedRemainingTimeSeconds: null, // Clear saved time (it's now active)
+                    savedTimeDate: null, // Clear saved date
+                    lastLogin: serverTimestamp(),
+                    updatedAt: serverTimestamp(),
+                  };
+                  
+                  if (shouldGrantGrace) {
+                    updateData.lastGracePeriodDate = today; // Record grace period granted
+                  }
+                  
+                  await Promise.race([
+                    updateDoc(userDocRef, updateData),
+                    timeoutPromise
+                  ]);
+                  
+                  // Update local state
+                  setSessionStartTime(startTime);
+                  setSessionEndTime(endTime);
+                  setActiveTimeRemaining(totalTimeSeconds);
+                  setHasActiveTime(true);
+                  setIsSessionActive(true);
+                  
+                  // Save to sessionStorage
+                  sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
+                    rfid: rfidFromUrl,
+                    sessionStartTime: startTime,
+                    sessionEndTime: endTime
+                  }));
+                  
+                  // Show modal with restored time info
+                  setRestoredTimeSeconds(savedRemainingTime);
+                  setShowTimeRestoredModal(true);
+                  
+                  console.log(`💾 Restored ${totalTimeSeconds}s (${savedRemainingTime}s saved + ${shouldGrantGrace ? '300s grace' : '0s grace'})`);
+                  
+                  // Skip grace period grant since we already handled it
+                  setLoading(false);
+                  return;
+                } else {
+                  console.error("⚠️ Failed to restore saved time - API returned error");
+                }
+              } catch (error) {
+                console.error("⚠️ Failed to restore saved time:", error);
+                // Continue to normal grace period logic
+              }
+            }
+          }
           
           // Grant 5-minute grace period internet access (ONLY ONCE PER DAY and NO ACTIVE SESSION)
           if (canGrantGracePeriod && (!data.sessionEndTime || data.sessionEndTime <= Date.now())) {
@@ -575,20 +872,23 @@ export default function Dashboard() {
                 const responseData = await graceResponse.json();
                 console.log("✅ 5-minute grace period internet granted:", responseData);
                 
-                // Set end time (5 minutes from now)
-                const endTime = Date.now() + (300 * 1000);
+                // Set start and end time
+                const startTime = Date.now(); // Session starts now
+                const endTime = startTime + (300 * 1000); // 5 minutes from now
                 
-                // Update Firestore with today's date AND sessionEndTime
+                // Update Firestore with today's date AND session timestamps
                 await Promise.race([
                   updateDoc(userDocRef, {
                     lastLogin: serverTimestamp(),
                     lastGracePeriodDate: today, // Record today's date
+                    sessionStartTime: startTime, // Save session start timestamp
                     sessionEndTime: endTime, // Save session end timestamp
                     updatedAt: serverTimestamp(),
                   }),
                   timeoutPromise
                 ]);
                 
+                setSessionStartTime(startTime);
                 setSessionEndTime(endTime);
                 setHasActiveTime(true);
                 setActiveTimeRemaining(300); // 5 minutes
@@ -597,6 +897,7 @@ export default function Dashboard() {
                 // Save session to sessionStorage so user can return from portal
                 sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
                   rfid: rfidFromUrl,
+                  sessionStartTime: startTime,
                   sessionEndTime: endTime
                 }));
                 console.log("💾 Session saved to storage and Firestore");
@@ -706,25 +1007,51 @@ export default function Dashboard() {
       
       setActiveTimeRemaining(remaining);
       
-      if (remaining <= 0) {
-        // Time expired!
-        console.log("⏰ Purchased time expired");
-        setHasActiveTime(false);
-        setIsSessionActive(false);
-        setSessionEndTime(null);
-        setShowSessionExpiredModal(true);
-        
-        // Clear session from storage AND Firestore
-        sessionStorage.removeItem('ezvendo_active_session');
-        
-        // Clear from Firestore
-        const userDocRef = doc(db, "users", rfidFromUrl);
-        updateDoc(userDocRef, {
-          sessionEndTime: null,
-        }).catch(err => console.error("Error clearing session from Firestore:", err));
-        
-        console.log("🗑️ Session cleared from storage and Firestore");
-      }
+        if (remaining <= 0) {
+          // Time expired!
+          console.log("⏰ Purchased time expired");
+          
+          // Save session history to session_history collection before clearing
+          const actualSessionStartTime = sessionStartTime || (sessionEndTime ? new Date(sessionEndTime - ((sessionEndTime - (sessionStartTime || sessionEndTime)) / 1000) * 1000) : new Date());
+          const sessionEndTimeDate = new Date();
+          const actualDuration = actualSessionStartTime ? Math.floor((sessionEndTimeDate - actualSessionStartTime) / 1000) : 0;
+          
+          const sessionHistoryData = {
+            userId: rfidFromUrl,
+            userName: userData?.fullName || "Unknown",
+            sessionStartTime: actualSessionStartTime,
+            sessionEndTime: sessionEndTimeDate,
+            durationSeconds: actualDuration,
+            timeRemainingSeconds: 0,
+            timeRemainingMinutes: 0,
+            action: "expired",
+            savedForNextSession: false,
+            timestamp: serverTimestamp(), // For ordering in queries
+            createdAt: serverTimestamp(),
+          };
+          
+          addDoc(collection(db, "session_history"), sessionHistoryData)
+            .then(ref => console.log("✅ Session history saved (expired):", ref.id))
+            .catch(err => console.error("Error saving session history:", err));
+          
+          setHasActiveTime(false);
+          setIsSessionActive(false);
+          setSessionStartTime(null);
+          setSessionEndTime(null);
+          setShowSessionExpiredModal(true);
+          
+          // Clear session from storage AND Firestore
+          sessionStorage.removeItem('ezvendo_active_session');
+          
+          // Clear from Firestore
+          const userDocRef = doc(db, "users", rfidFromUrl);
+          updateDoc(userDocRef, {
+            sessionStartTime: null,
+            sessionEndTime: null,
+          }).catch(err => console.error("Error clearing session from Firestore:", err));
+          
+          console.log("🗑️ Session cleared from storage and Firestore");
+        }
     };
 
     // Update immediately
@@ -927,7 +1254,7 @@ export default function Dashboard() {
         <div className="flex flex-col gap-4">
           {/* Time remaining display */}
           {hasActiveTime && (
-            <div className="flex items-center justify-center">
+            <div className="flex flex-col items-center justify-center gap-3">
               <div className="col-span-1 flex flex-col items-center justify-center gap-1">
                 <span className="text-gray-500 text-sm sm:text-base">Time Remaining</span>
                 <span className="font-bold text-4xl sm:text-5xl text-green-500 tabular-nums">
@@ -937,6 +1264,14 @@ export default function Dashboard() {
                   Internet active
                 </span>
               </div>
+              {/* End Session Button */}
+              <button
+                onClick={handleEndSession}
+                className="flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white rounded-full text-sm font-semibold transition-colors duration-150"
+              >
+                <Clock className="size-4" />
+                End Session & Save Time
+              </button>
             </div>
           )}
           
@@ -1023,119 +1358,32 @@ export default function Dashboard() {
             </div>
           </div> */}
 
-          {/* information (Cards) */}
-          <div className="grid grid-cols-1 gap-3">
-            {/* Billing rate (From system config) */}
-            <div className="col-span-1 flex items-center bg-blue-500 px-5 py-5 rounded-2xl">
-              <div className="flex flex-col gap- flex-1">
-                <span className="text-gray-50 text-sm">Billing rate</span>
-                <span className="font-semibold text-white">
-                  ₱{billingRatePerMinute.toFixed(2)} / min
-                </span>
-              </div>
-            </div>
+          {/* Billing rate - Text only */}
+          <div className="flex items-center justify-center">
+            <span className="text-gray-600 text-sm">
+              Billing rate: <span className="font-semibold text-gray-800">₱{billingRatePerMinute.toFixed(2)} / min</span>
+            </span>
           </div>
 
-          {/* Transactions */}
-          <div className="flex flex-col gap-4 mt-2">
-            {/* header */}
-            <div className="flex items-center justify-between">
-              <span className="text-lg font-semibold">Recent transactions</span>
-              <Link
-                href="/transactions"
-                className=" text-gray-500  hover:text-green-500 active:text-green-600 transition-colors duration-150 flex items-center justify-center rounded-full gap-1"
-              >
-                <span className="text-sm">View all</span>
-                <ChevronRight className="size-5" />
-              </Link>
-            </div>
-            {/* 🛑 CONDITIONAL RENDERING FOR TRANSACTION LIST / EMPTY STATE */}
-            {recentTransactions.length > 0 ? (
-              // --- TRANSACTION CARDS ---
-              <div className="flex flex-col gap-2">
-                {recentTransactions.map((tx, index) => {
-                  // FIX 1: Destructure new classes
-                  const {
-                    Icon,
-                    SignIcon,
-                    colorClass,
-                    bgColorClass,
-                  } = getTransactionDetails(tx.type);
-                  const dateString = formatDate(tx.date);
-
-                  return (
-                    <div
-                      key={index}
-                      onClick={() => setSelectedTransaction(tx)}
-                      className="flex items-center justify-between gap-4 p-5 rounded-2xl border border-gray-300 bg-white hover:bg-gray-50 active:bg-gray-100 transition-colors duration-150 cursor-pointer"
-                    >
-                      {/* left */}
-                      <div className="flex items-center gap-3">
-                        {/* 🛑 FIX 2: Apply bgColorClass to the background circle */}
-                        <div
-                          className={`flex items-center text-white rounded-full p-2 justify-center ${bgColorClass}`}
-                        >
-                          <Icon className="size-5" />
-                        </div>
-                        <div className="flex flex-col">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold">{tx.type}</span>
-                            {/* Status Badge for Top-up Requests */}
-                            {tx.isTopUpRequest && tx.status === "pending" && (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-semibold border border-orange-300">
-                                Pending
-                              </span>
-                            )}
-                            {tx.isTopUpRequest && tx.status === "approved" && (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold border border-green-300">
-                                Approved
-                              </span>
-                            )}
-                            {tx.isTopUpRequest && tx.status === "rejected" && (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold border border-red-300">
-                                Rejected
-                              </span>
-                            )}
-                          </div>
-                          <span className="text-sm text-gray-500">
-                            {dateString}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* right - Dynamic Sign Icon and Amount */}
-                      <div
-                        // 🛑 FIX 3: Apply text color class directly
-                        className={`flex items-center gap-1 ${colorClass}`}
-                      >
-                        <SignIcon className="size-4" />
-                        <span className=" font-bold">
-                          P{tx.amount.toFixed(2)}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              // --- NO TRANSACTIONS EMPTY STATE ---
-              // ... (JSX for No Transactions remains here) ...
-              <div className="flex flex-col items-center justify-center p-6 gap-5 bg-white rounded-2xl border border-gray-300 ">
-                <div className="bg-gray-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full">
-                  <ScrollText className="text-gray-500 size-6 sm:size-7" />
-                </div>
-                <div className="flex flex-col items-center justify-center gap-2">
-                  <div className="flex flex-col text-center">
-                    <span className="text-lg sm:text-xl font-semibold">
-                      No Transactions
-                    </span>
-                    <span className="text-gray-500 text-xs sm:text-sm">
-                      There are no transactions made.
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
+          {/* Navigation Tabs */}
+          <div className="flex items-center gap-3 justify-center">
+            {/* Transactions Button */}
+            <Link
+              href={`/transactions?rfid=${encodeURIComponent(rfidFromUrl)}`}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 active:bg-green-700 text-white rounded-xl text-sm font-semibold transition-colors duration-150"
+            >
+              <ScrollText className="size-4" />
+              Transactions
+            </Link>
+            
+            {/* Session History Button */}
+            <Link
+              href={`/session-history?rfid=${encodeURIComponent(rfidFromUrl)}`}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-xl text-sm font-semibold transition-colors duration-150"
+            >
+              <Clock className="size-4" />
+              Sessions
+            </Link>
           </div>
         </div>
       </div>
@@ -1635,6 +1883,236 @@ export default function Dashboard() {
               className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
             >
               I Understand
+            </button>
+          </div>
+        </div>
+      )}
+      
+      {/* Modal for Time Restored */}
+      {showTimeRestoredModal && (
+        <div className="flex min-h-dvh flex-col items-center justify-center fixed inset-0 w-full bg-black/50 p-3 sm:p-4 md:px-0 z-50">
+          <div className="bg-white rounded-2xl py-6 px-4 flex flex-col items-center justify-center gap-5 w-full max-w-md">
+            <div className="bg-green-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
+              <CheckCircle className="text-green-500 size-6 sm:size-7" />
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-2">
+              <div className="flex flex-col text-center">
+                <span className="text-lg sm:text-xl font-semibold text-green-600">
+                  Time Restored!
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm">
+                  Your saved time has been restored and added to your session.
+                </span>
+              </div>
+            </div>
+
+            {/* Information Box */}
+            <div className="flex flex-col gap-3 p-4 bg-green-50 border border-green-200 rounded-lg w-full">
+              <div className="flex items-center justify-center gap-2">
+                <Clock className="text-green-600 size-5" />
+                <span className="font-bold text-lg text-green-600">
+                  {formatTime(restoredTimeSeconds)}
+                </span>
+                <span className="text-gray-600 text-sm">
+                  saved time restored
+                </span>
+              </div>
+              
+              <div className="flex items-start gap-2 pt-2 border-t border-green-200">
+                <div className="flex items-center justify-center min-w-6 min-h-6 bg-green-500 rounded-full mt-0.5">
+                  <span className="text-white text-sm font-semibold">+</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="font-semibold text-sm">Added to Session</span>
+                  <span className="text-gray-600 text-xs">
+                    {restoredTimeSeconds >= 300 ? 
+                      `Your saved time has been combined with today's 5-minute grace period.` :
+                      `Your saved time has been added to your current session.`
+                    }
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowTimeRestoredModal(false)}
+              className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+            >
+              Got It
+            </button>
+          </div>
+        </div>
+      )}
+      
+      {/* Modal for End Session Confirmation */}
+      {showEndSessionConfirm && (
+        <div className="flex min-h-dvh flex-col items-center justify-center fixed inset-0 w-full bg-black/50 p-3 sm:p-4 md:px-0 z-50">
+          <div className="bg-white rounded-2xl py-6 px-4 flex flex-col items-center justify-center gap-5 w-full max-w-md">
+            <div className="bg-orange-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
+              <Clock className="text-orange-500 size-6 sm:size-7" />
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-2">
+              <div className="flex flex-col text-center">
+                <span className="text-lg sm:text-xl font-semibold">
+                  End Session?
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm">
+                  Your remaining time will be saved for your next visit.
+                </span>
+              </div>
+            </div>
+
+            {/* Information Box */}
+            <div className="flex flex-col gap-3 p-4 bg-orange-50 border border-orange-200 rounded-lg w-full">
+              <div className="flex items-center justify-center gap-2">
+                <Clock className="text-orange-600 size-5" />
+                <span className="font-bold text-lg text-orange-600">
+                  {formatTime(activeTimeRemaining)}
+                </span>
+                <span className="text-gray-600 text-sm">
+                  remaining time will be saved
+                </span>
+              </div>
+              
+              <div className="flex items-start gap-2 pt-2 border-t border-orange-200">
+                <div className="flex items-center justify-center min-w-6 min-h-6 bg-orange-500 rounded-full mt-0.5">
+                  <span className="text-white text-sm font-semibold">ℹ️</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="font-semibold text-sm">Internet will be disconnected</span>
+                  <span className="text-gray-600 text-xs">
+                    Your internet access will be removed immediately when you confirm.
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Buttons */}
+            <div className="flex items-center gap-2 w-full">
+              <button
+                onClick={() => setShowEndSessionConfirm(false)}
+                disabled={isEndingSession}
+                className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-gray-300 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmEndSession}
+                disabled={isEndingSession}
+                className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-orange-500 bg-orange-500 text-white hover:border-orange-600 hover:bg-orange-600 active:border-orange-700 active:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+              >
+                {isEndingSession ? (
+                  <>
+                    <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    Ending...
+                  </>
+                ) : (
+                  "Confirm"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Modal for End Session Success */}
+      {showEndSessionSuccess && (
+        <div className="flex min-h-dvh flex-col items-center justify-center fixed inset-0 w-full bg-black/50 p-3 sm:p-4 md:px-0 z-50">
+          <div className="bg-white rounded-2xl py-6 px-4 flex flex-col items-center justify-center gap-5 w-full max-w-md">
+            <div className="bg-green-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
+              <CheckCircle className="text-green-500 size-6 sm:size-7" />
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-2">
+              <div className="flex flex-col text-center">
+                <span className="text-lg sm:text-xl font-semibold text-green-600">
+                  Session Ended Successfully!
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm">
+                  Your remaining time has been saved.
+                </span>
+              </div>
+            </div>
+
+            {/* Information Box */}
+            <div className="flex flex-col gap-3 p-4 bg-green-50 border border-green-200 rounded-lg w-full">
+              <div className="flex items-center justify-center gap-2">
+                <Clock className="text-green-600 size-5" />
+                <span className="font-bold text-lg text-green-600">
+                  {savedTimeMinutes} {savedTimeMinutes === 1 ? 'minute' : 'minutes'}
+                </span>
+                <span className="text-gray-600 text-sm">
+                  saved for next visit
+                </span>
+              </div>
+              
+              <div className="flex items-start gap-2 pt-2 border-t border-green-200">
+                <div className="flex items-center justify-center min-w-6 min-h-6 bg-green-500 rounded-full mt-0.5">
+                  <span className="text-white text-sm font-semibold">✓</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="font-semibold text-sm">Internet Access Removed</span>
+                  <span className="text-gray-600 text-xs">
+                    Your internet connection has been disconnected. Your saved time will be available on your next scan.
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Revoke Status Indicator */}
+            {!revokeSuccess && (
+              <div className="flex items-start gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg w-full">
+                <div className="flex items-center justify-center min-w-6 min-h-6 bg-yellow-500 rounded-full mt-0.5">
+                  <span className="text-white text-sm font-semibold">!</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="font-semibold text-sm text-yellow-900">Note</span>
+                  <span className="text-yellow-800 text-xs">
+                    Internet access revocation may have failed, but your time has been saved. You may need to manually disconnect.
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowEndSessionSuccess(false)}
+              className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+            >
+              Got It
+            </button>
+          </div>
+        </div>
+      )}
+      
+      {/* Modal for End Session Error */}
+      {showEndSessionError && (
+        <div className="flex min-h-dvh flex-col items-center justify-center fixed inset-0 w-full bg-black/50 p-3 sm:p-4 md:px-0 z-50">
+          <div className="bg-white rounded-2xl py-6 px-4 flex flex-col items-center justify-center gap-5 w-full max-w-md">
+            <div className="bg-red-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
+              <X className="text-red-500 size-6 sm:size-7" />
+            </div>
+            
+            <div className="flex flex-col items-center justify-center gap-2">
+              <div className="flex flex-col text-center">
+                <span className="text-lg sm:text-xl font-semibold text-red-600">
+                  Error Ending Session
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm mt-2">
+                  {endSessionError || "An error occurred while ending your session. Please try again."}
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                setShowEndSessionError(false);
+                setEndSessionError("");
+              }}
+              className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-red-500 bg-red-500 text-white hover:border-red-600 hover:bg-red-600 active:border-red-700 active:bg-red-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+            >
+              Close
             </button>
           </div>
         </div>

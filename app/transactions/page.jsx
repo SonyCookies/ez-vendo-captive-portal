@@ -8,62 +8,52 @@ import {
   Minus,
   BanknoteArrowUp,
   BanknoteArrowDown,
+  X,
+  Eye,
   CircleQuestionMark,
   Moon,
   ListFilter, // Keep this if used in the modal
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import { db } from "@/app/config/firebase";
+import { collection, query, where, getDocs, orderBy, doc, getDoc } from "firebase/firestore";
 
 // --- Constants ---
 const TRANSACTION_TYPE = {
   TOP_UP: "Top-up",
   DEDUCTION: "Deducted",
+  TOP_UP_PENDING: "Top-up Request",
+  TOP_UP_APPROVED: "Top-up Approved",
+  TOP_UP_REJECTED: "Top-up Rejected",
 };
-
-// --- Static Data Generation ---
-const today = new Date();
-const yesterday = new Date(Date.now() - 86400000); // 1 day ago
-const lastWeek = new Date(Date.now() - 5 * 86400000); // 5 days ago
-
-// Static data for demonstration
-const allTransactions = [
-  {
-    id: `D-${Date.now()}`,
-    type: TRANSACTION_TYPE.DEDUCTION,
-    amount: 5.0,
-    date: today,
-  },
-  {
-    id: `T-${Date.now() - 1000}`,
-    type: TRANSACTION_TYPE.TOP_UP,
-    amount: 50.0,
-    date: today,
-  },
-  {
-    id: `D-${Date.now() - 90000000}`,
-    type: TRANSACTION_TYPE.DEDUCTION,
-    amount: 5.0,
-    date: yesterday,
-  },
-  {
-    id: `T-${Date.now() - 400000000}`,
-    type: TRANSACTION_TYPE.TOP_UP,
-    amount: 15.0,
-    date: lastWeek,
-  },
-];
-// To test the empty state, use: const allTransactions = [];
 
 // --- Helper Functions ---
 
 const getTransactionDetails = (type) => {
-  if (type === TRANSACTION_TYPE.TOP_UP) {
+  if (type === TRANSACTION_TYPE.TOP_UP || type === TRANSACTION_TYPE.TOP_UP_APPROVED) {
     return {
       Icon: BanknoteArrowUp,
       colorClass: "text-green-500",
       bgColorClass: "bg-green-500",
       SignIcon: Plus,
+    };
+  }
+  if (type === TRANSACTION_TYPE.TOP_UP_PENDING) {
+    return {
+      Icon: BanknoteArrowUp,
+      colorClass: "text-orange-500",
+      bgColorClass: "bg-orange-500",
+      SignIcon: Plus,
+    };
+  }
+  if (type === TRANSACTION_TYPE.TOP_UP_REJECTED) {
+    return {
+      Icon: BanknoteArrowUp,
+      colorClass: "text-red-500",
+      bgColorClass: "bg-red-500",
+      SignIcon: X,
     };
   }
   return {
@@ -75,11 +65,15 @@ const getTransactionDetails = (type) => {
 };
 
 const formatDate = (date) => {
+  if (!date) return "N/A";
+  const d = date instanceof Date ? date : date.toDate ? date.toDate() : new Date(date);
   const options = { month: "short", day: "numeric" };
-  return date.toLocaleDateString("en-US", options);
+  return d.toLocaleDateString("en-US", options);
 };
 
 const formatModalDate = (date) => {
+  if (!date) return "N/A";
+  const d = date instanceof Date ? date : date.toDate ? date.toDate() : new Date(date);
   const options = {
     year: "numeric",
     month: "long",
@@ -89,7 +83,7 @@ const formatModalDate = (date) => {
     second: "numeric",
     hour12: true,
   };
-  return date.toLocaleDateString("en-US", options);
+  return d.toLocaleDateString("en-US", options);
 };
 
 // --- Grouping Logic ---
@@ -104,7 +98,7 @@ const groupTransactions = (transactions) => {
   const last7DaysTxs = [];
 
   transactions.forEach((tx) => {
-    const txDate = tx.date;
+    const txDate = tx.date instanceof Date ? tx.date : tx.date?.toDate ? tx.date.toDate() : new Date(tx.date);
     if (txDate >= todayStart) {
       todayTxs.push(tx);
     } else if (txDate >= yesterdayStart) {
@@ -120,11 +114,102 @@ const groupTransactions = (transactions) => {
 // =================================================================
 // 🖥️ TRANSACTION PAGE COMPONENT START
 // =================================================================
-export default function Transactions() {
+function TransactionsContent() {
+  const searchParams = useSearchParams();
+  const rfidFromUrl = searchParams.get("rfid");
+  
+  const [transactions, setTransactions] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
-  const { todayTxs, yesterdayTxs, last7DaysTxs } = groupTransactions(
-    allTransactions
-  );
+  const [userData, setUserData] = useState(null);
+
+  useEffect(() => {
+    const fetchTransactions = async () => {
+      if (!rfidFromUrl) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        // Fetch user data
+        const userDocRef = doc(db, "users", rfidFromUrl);
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+          setUserData(userSnap.data());
+        }
+
+        // Fetch transactions from transactions collection
+        const transactionsQuery = query(
+          collection(db, "transactions"),
+          where("userId", "==", rfidFromUrl),
+          orderBy("timestamp", "desc")
+        );
+
+        const transactionsSnapshot = await getDocs(transactionsQuery);
+        const transactionList = [];
+        
+        transactionsSnapshot.forEach((doc) => {
+          const data = doc.data();
+          transactionList.push({
+            id: doc.id,
+            type: data.type === "Top-up" ? TRANSACTION_TYPE.TOP_UP : TRANSACTION_TYPE.DEDUCTION,
+            amount: data.amount || 0,
+            date: data.timestamp?.toDate ? data.timestamp.toDate() : new Date(data.timestamp),
+            description: data.description || "",
+            minutesPurchased: data.minutesPurchased || null,
+            minutesUsed: data.minutesUsed || null,
+          });
+        });
+
+        // Fetch top-up requests from topup_requests collection
+        const topUpQuery = query(
+          collection(db, "topup_requests"),
+          where("userId", "==", rfidFromUrl),
+          orderBy("requestedAt", "desc")
+        );
+
+        const topUpSnapshot = await getDocs(topUpQuery);
+        
+        topUpSnapshot.forEach((doc) => {
+          const data = doc.data();
+          let transactionType;
+          if (data.status === "pending") {
+            transactionType = TRANSACTION_TYPE.TOP_UP_PENDING;
+          } else if (data.status === "approved") {
+            transactionType = TRANSACTION_TYPE.TOP_UP_APPROVED;
+          } else if (data.status === "rejected") {
+            transactionType = TRANSACTION_TYPE.TOP_UP_REJECTED;
+          }
+
+          transactionList.push({
+            id: doc.id,
+            type: transactionType,
+            amount: data.amount || 0,
+            date: data.requestedAt?.toDate ? data.requestedAt.toDate() : new Date(data.requestedAt),
+            status: data.status,
+            referenceId: data.referenceId,
+            receiptURL: data.receiptURL,
+            isTopUpRequest: true,
+          });
+        });
+
+        // Sort all transactions by date (most recent first)
+        transactionList.sort((a, b) => b.date - a.date);
+
+        setTransactions(transactionList);
+        console.log(`✅ Fetched ${transactionList.length} transaction(s)`);
+      } catch (error) {
+        console.error("Error fetching transactions:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchTransactions();
+  }, [rfidFromUrl]);
+
+  const { todayTxs, yesterdayTxs, last7DaysTxs } = groupTransactions(transactions);
+  const hasAnyTransactions = todayTxs.length > 0 || yesterdayTxs.length > 0 || last7DaysTxs.length > 0;
 
   // --- Helper Components (Defined inside the page) ---
 
@@ -165,7 +250,25 @@ export default function Transactions() {
             <Icon className="size-5" />
           </div>
           <div className="flex flex-col">
-            <span className="font-semibold">{tx.type}</span>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold">{tx.type}</span>
+              {/* Status Badge for Top-up Requests */}
+              {tx.isTopUpRequest && tx.status === "pending" && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-semibold border border-orange-300">
+                  Pending
+                </span>
+              )}
+              {tx.isTopUpRequest && tx.status === "approved" && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold border border-green-300">
+                  Approved
+                </span>
+              )}
+              {tx.isTopUpRequest && tx.status === "rejected" && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold border border-red-300">
+                  Rejected
+                </span>
+              )}
+            </div>
             <span className="text-sm text-gray-500">{dateString}</span>
           </div>
         </div>
@@ -178,6 +281,18 @@ export default function Transactions() {
     );
   };
 
+  // Show loading state while fetching data
+  if (loading) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div>
+          <span className="text-gray-500">Loading transactions...</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-dvh flex justify-center text-sm sm:text-base sm:bg-white">
       <div className="flex flex-col gap-6 p-3 sm:p-4 md:px-0 w-full max-w-md">
@@ -185,7 +300,7 @@ export default function Transactions() {
         <div className="relative flex items-center justify-center w-full pt-2">
           {/* left */}
           <Link
-            href="/dashboard"
+            href={`/dashboard?rfid=${encodeURIComponent(rfidFromUrl || "")}`}
             className="absolute left-0 rounded-full border border-gray-300/80 bg-white hover:bg-gray-50 active:bg-gray-100 cursor-pointer transition-colors duration-150  p-2"
           >
             <ChevronLeft className="size-4 sm:size-5" />
@@ -200,62 +315,61 @@ export default function Transactions() {
         {/* Main */}
         <div className="flex flex-col gap-4">
           {/* Today's Transaction */}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm sm:text-base font-semibold">Today</span>
+          {todayTxs.length > 0 && (
             <div className="flex flex-col gap-2">
-              {todayTxs.length > 0 ? (
-                todayTxs.map((tx, index) => (
+              <span className="text-sm sm:text-base font-semibold">Today</span>
+              <div className="flex flex-col gap-2">
+                {todayTxs.map((tx) => (
                   <TransactionCard
-                    key={index}
+                    key={tx.id}
                     tx={tx}
                     onClick={() => setSelectedTransaction(tx)}
                   />
-                ))
-              ) : (
-                <NoTransactionsEmptyState />
-              )}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Yesterday's Transaction */}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm sm:text-base font-semibold">
-              Yesterday
-            </span>
+          {yesterdayTxs.length > 0 && (
             <div className="flex flex-col gap-2">
-              {yesterdayTxs.length > 0 ? (
-                yesterdayTxs.map((tx, index) => (
+              <span className="text-sm sm:text-base font-semibold">
+                Yesterday
+              </span>
+              <div className="flex flex-col gap-2">
+                {yesterdayTxs.map((tx) => (
                   <TransactionCard
-                    key={index}
+                    key={tx.id}
                     tx={tx}
                     onClick={() => setSelectedTransaction(tx)}
                   />
-                ))
-              ) : (
-                <NoTransactionsEmptyState />
-              )}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Last 7 Day Transactions */}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm sm:text-base font-semibold">
-              Last 7 Days
-            </span>
+          {last7DaysTxs.length > 0 && (
             <div className="flex flex-col gap-2">
-              {last7DaysTxs.length > 0 ? (
-                last7DaysTxs.map((tx, index) => (
+              <span className="text-sm sm:text-base font-semibold">
+                Last 7 Days
+              </span>
+              <div className="flex flex-col gap-2">
+                {last7DaysTxs.map((tx) => (
                   <TransactionCard
-                    key={index}
+                    key={tx.id}
                     tx={tx}
                     onClick={() => setSelectedTransaction(tx)}
                   />
-                ))
-              ) : (
-                <NoTransactionsEmptyState />
-              )}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Show empty state only if no transactions at all */}
+          {!hasAnyTransactions && (
+            <NoTransactionsEmptyState />
+          )}
         </div>
       </div>
 
@@ -306,14 +420,61 @@ export default function Transactions() {
             })()}
 
             {/* Details */}
+            {selectedTransaction.description && (
+              <div className="flex flex-col gap-1 p-3 bg-gray-50 border border-gray-200 rounded-lg w-full">
+                <span className="text-xs font-semibold text-gray-700">Description:</span>
+                <span className="text-sm text-gray-800">{selectedTransaction.description}</span>
+              </div>
+            )}
+
+            {selectedTransaction.minutesPurchased && (
+              <div className="flex flex-col gap-1 p-3 bg-blue-50 border border-blue-200 rounded-lg w-full">
+                <span className="text-xs font-semibold text-gray-700">Minutes Purchased:</span>
+                <span className="text-sm text-gray-800">{selectedTransaction.minutesPurchased} minutes</span>
+              </div>
+            )}
+
+            {selectedTransaction.minutesUsed && (
+              <div className="flex flex-col gap-1 p-3 bg-blue-50 border border-blue-200 rounded-lg w-full">
+                <span className="text-xs font-semibold text-gray-700">Minutes Used:</span>
+                <span className="text-sm text-gray-800">{selectedTransaction.minutesUsed} minutes</span>
+              </div>
+            )}
+
+            {/* Additional info for top-up requests */}
+            {selectedTransaction.isTopUpRequest && (
+              <>
+                {/* Reference ID */}
+                {selectedTransaction.referenceId && (
+                  <div className="flex flex-col gap-1 p-3 bg-blue-50 border border-blue-200 rounded-lg w-full">
+                    <span className="text-xs font-semibold text-gray-700">GCash Reference ID:</span>
+                    <span className="text-sm text-gray-800 font-mono">{selectedTransaction.referenceId}</span>
+                  </div>
+                )}
+                
+                {/* View Receipt Button */}
+                {selectedTransaction.receiptURL && (
+                  <a
+                    href={selectedTransaction.receiptURL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="cursor-pointer text-sm px-4 py-2 border border-blue-500 bg-blue-500 text-white hover:border-blue-600 hover:bg-blue-600 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+                  >
+                    <Eye className="size-4" />
+                    View Receipt
+                  </a>
+                )}
+              </>
+            )}
+
             <div className="flex w-full items-center justify-between rounded-lg p-4 bg-gray-100">
               {/* left */}
               <div className="flex flex-col">
                 <span className="text-xs sm:text-sm font-semibold">
-                  Edward Gatbonton
+                  {userData?.fullName || "User"}
                 </span>
                 <span className="text-xs sm:text-sm text-gray-500">
-                  123456789
+                  {userData?.rfidCardId || rfidFromUrl || "N/A"}
                 </span>
               </div>
               {/* right */}
@@ -321,8 +482,8 @@ export default function Transactions() {
                 <span className="text-xs sm:text-sm font-semibold">
                   Transaction ID:
                 </span>
-                <span className="text-xs sm:text-sm text-gray-500">
-                  {selectedTransaction.id}
+                <span className="text-xs sm:text-sm text-gray-500 font-mono">
+                  {selectedTransaction.id.substring(0, 8)}...
                 </span>
               </div>
             </div>
@@ -338,5 +499,22 @@ export default function Transactions() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function Transactions() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-dvh flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div>
+            <span className="text-gray-500">Loading transactions...</span>
+          </div>
+        </div>
+      }
+    >
+      <TransactionsContent />
+    </Suspense>
   );
 }

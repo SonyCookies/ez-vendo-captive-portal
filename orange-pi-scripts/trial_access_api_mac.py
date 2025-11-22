@@ -14,10 +14,12 @@ import subprocess
 import json
 import re
 import logging
+import os
 
 # Configuration
 PORT = 8080
 TRIAL_SCRIPT = "/home/sonny/grant_trial_access_mac.sh"
+REVOKE_SCRIPT = "/home/sonny/revoke_access_mac.sh"
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -61,6 +63,10 @@ class TrialAccessHandler(BaseHTTPRequestHandler):
         # Endpoint: /grant-access?ip=192.168.1.100&duration=300 (Explicit IP)
         elif self.path.startswith('/grant-access'):
             self.handle_grant_access()
+        
+        # Endpoint: /revoke-access (Auto-detect client IP)
+        elif self.path.startswith('/revoke-access'):
+            self.handle_revoke_access()
         
         # Endpoint: /status
         elif self.path == '/status':
@@ -202,6 +208,130 @@ class TrialAccessHandler(BaseHTTPRequestHandler):
             logger.error(f"❌ Error: {str(e)}")
             self.send_error(500, str(e))
     
+    def handle_revoke_access(self):
+        """Revoke internet access immediately - Auto-detect client IP from request"""
+        
+        # Auto-detect client IP from HTTP request
+        client_ip = self.client_address[0]
+        
+        logger.info(f"📡 Revoke request from {client_ip}")
+        
+        # Convert IP to MAC address
+        client_mac = get_mac_from_ip(client_ip)
+        
+        if not client_mac:
+            self.send_error(500, f"Cannot find MAC address for IP {client_ip}. Device may not be in ARP table yet.")
+            return
+        
+        logger.info(f"🎯 Revoking access for MAC: {client_mac}")
+        
+        try:
+            # Convert to uppercase and use : separator for consistency
+            client_mac = client_mac.upper().replace('-', ':')
+            
+            logger.info(f"🔧 Attempting to revoke access for MAC: {client_mac}")
+            
+            # Option 1: Try using revoke script (if it exists)
+            if os.path.exists(REVOKE_SCRIPT):
+                logger.info(f"📜 Using revoke script: {REVOKE_SCRIPT}")
+                result = subprocess.run(
+                    ['sudo', REVOKE_SCRIPT, client_mac],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"✅ Revoke script executed successfully")
+                    logger.info(f"📝 Output: {result.stdout}")
+                else:
+                    logger.error(f"❌ Revoke script failed: {result.stderr}")
+                    logger.error(f"📝 Output: {result.stdout}")
+                    # Continue to manual removal as fallback
+            
+            # Option 2: Manual iptables removal (fallback or if script doesn't exist)
+            logger.info(f"🔧 Manually removing iptables rules...")
+            
+            # Kill any scheduled removal processes for this MAC
+            pkill_result = subprocess.run(
+                ['pkill', '-f', f'sleep.*{client_mac}'],
+                stderr=subprocess.DEVNULL,
+                timeout=2
+            )
+            if pkill_result.returncode == 0:
+                logger.info(f"✅ Killed scheduled removal process")
+            
+            # Check if FORWARD rule exists before removing
+            check_forward = subprocess.run(
+                ['sudo', 'iptables', '-C', 'FORWARD', '-m', 'mac', '--mac-source', client_mac, '-j', 'ACCEPT'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if check_forward.returncode == 0:
+                # Rule exists - remove it
+                forward_result = subprocess.run(
+                    ['sudo', 'iptables', '-D', 'FORWARD', '-m', 'mac', '--mac-source', client_mac, '-j', 'ACCEPT'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if forward_result.returncode == 0:
+                    logger.info(f"✅ Removed FORWARD rule for {client_mac}")
+                else:
+                    logger.error(f"❌ Failed to remove FORWARD rule: {forward_result.stderr}")
+            else:
+                logger.info(f"ℹ️ FORWARD rule doesn't exist (already removed) for {client_mac}")
+            
+            # Check if MANGLE rule exists before removing
+            check_mangle = subprocess.run(
+                ['sudo', 'iptables', '-t', 'mangle', '-C', 'AUTHORIZED_MARK', '-m', 'mac', '--mac-source', client_mac, '-j', 'MARK', '--set-mark', '1'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if check_mangle.returncode == 0:
+                # Rule exists - remove it
+                mangle_result = subprocess.run(
+                    ['sudo', 'iptables', '-t', 'mangle', '-D', 'AUTHORIZED_MARK', '-m', 'mac', '--mac-source', client_mac, '-j', 'MARK', '--set-mark', '1'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if mangle_result.returncode == 0:
+                    logger.info(f"✅ Removed MANGLE rule for {client_mac}")
+                else:
+                    logger.error(f"❌ Failed to remove MANGLE rule: {mangle_result.stderr}")
+            else:
+                logger.info(f"ℹ️ MANGLE rule doesn't exist (already removed) for {client_mac}")
+            
+            logger.info(f"✅ Access revocation process completed for MAC {client_mac}")
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            response = json.dumps({
+                "success": True,
+                "message": "Internet access revoked",
+                "ip": client_ip,
+                "mac": client_mac
+            })
+            self.wfile.write(response.encode())
+        
+        except subprocess.TimeoutExpired:
+            logger.error("❌ Script timeout")
+            self.send_error(500, "Script execution timeout")
+        
+        except Exception as e:
+            logger.error(f"❌ Error: {str(e)}")
+            self.send_error(500, str(e))
+    
     def log_message(self, format, *args):
         """Override to use custom logger"""
         logger.info(f"{self.address_string()} - {format % args}")
@@ -223,6 +353,7 @@ def run_server():
     logger.info(f"      - duration=600  → 10 minutes")
     logger.info(f"      - duration=1800 → 30 minutes")
     logger.info(f"      - duration=3600 → 60 minutes")
+    logger.info(f"  GET /revoke-access (Auto-detect client IP - Remove access immediately)")
     logger.info(f"  GET /status - Check API status")
     logger.info("=" * 50)
     

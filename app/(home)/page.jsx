@@ -79,28 +79,50 @@ export default function Home() {
       if (isRegistered) {
         console.log("✅ ESP32 verified: User is REGISTERED");
         
-        // Get balance and grace period DATE from ESP32
-        const { balance = 0, lastGracePeriodDate = "" } = cardData.rawData || cardData;
+        // Get balance, grace period DATE, and saved time from ESP32
+        const { 
+          balance = 0, 
+          lastGracePeriodDate = "",
+          savedRemainingTimeSeconds = 0,
+          savedTimeDate = ""
+        } = cardData.rawData || cardData;
         
         // Frontend does the date comparison (ESP32 has no RTC!)
         const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
         const gracePeriodUsedToday = (lastGracePeriodDate === today);
+        const hasSavedTime = savedRemainingTimeSeconds > 0;
+        const isNewDay = savedTimeDate !== today && savedTimeDate !== "";
         
         console.log("💰 User balance (from ESP32):", balance);
         console.log("📅 Last grace period date (from ESP32):", lastGracePeriodDate || "Never");
         console.log("📅 Today's date (from device):", today);
         console.log("🎁 Grace period used today:", gracePeriodUsedToday);
+        console.log("💾 Saved time (from ESP32):", savedRemainingTimeSeconds, "seconds");
+        console.log("📅 Saved time date (from ESP32):", savedTimeDate || "Never");
+        console.log("🔄 Has saved time:", hasSavedTime);
+        console.log("🔄 Is new day (for saved time):", isNewDay);
         
         setModalState(MODAL_STATE.REGISTERED);
         
-        // Wait 1.5 seconds, then check balance and grace period
+        // Wait 1.5 seconds, then check balance, grace period, and saved time
         await new Promise(resolve => setTimeout(resolve, 1500));
         
-        // Check if user has zero balance AND grace period already used today
-        if (balance === 0 && gracePeriodUsedToday) {
-          console.log("⚠️ Zero balance + grace period already used today!");
+        // Check if user has zero balance AND grace period already used today AND no saved time
+        if (balance === 0 && gracePeriodUsedToday && !hasSavedTime) {
+          console.log("⚠️ Zero balance + grace period already used today + no saved time!");
           setModalState(MODAL_STATE.GRACE_PERIOD_USED);
           return; // Don't grant access or redirect
+        }
+        
+        // If user has saved time, log it
+        if (hasSavedTime) {
+          console.log("✅ User has saved time - Access will be granted");
+          console.log(`   Saved time: ${Math.floor(savedRemainingTimeSeconds / 60)} minutes`);
+          if (isNewDay) {
+            console.log("   Will be added to today's grace period");
+          } else {
+            console.log("   Will be restored directly (same day)");
+          }
         }
         
         setModalState(MODAL_STATE.GRANTING_ACCESS);

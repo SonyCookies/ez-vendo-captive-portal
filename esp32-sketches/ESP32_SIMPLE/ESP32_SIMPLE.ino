@@ -74,6 +74,8 @@ struct {
     bool attemptsExceeded; // If attempts >= 3
     float balance; // For registered users
     String lastGracePeriodDate; // Date string (YYYY-MM-DD) - frontend will compare
+    float savedRemainingTimeSeconds; // Saved time from previous session
+    String savedTimeDate; // Date when time was saved (YYYY-MM-DD) - frontend will compare
   unsigned long timestamp;
 } latestScan;
 
@@ -300,6 +302,8 @@ void checkRegistrationStatus(String cardId) {
     latestScan.attemptsExceeded = false;
     latestScan.balance = 0.0;
     latestScan.lastGracePeriodDate = "";
+    latestScan.savedRemainingTimeSeconds = 0.0;
+    latestScan.savedTimeDate = "";
   
   WiFiClientSecure *client = new WiFiClientSecure;
   if (!client) {
@@ -384,11 +388,61 @@ void checkRegistrationStatus(String cardId) {
         }
       }
       
+      // Extract savedRemainingTimeSeconds (saved time from previous session)
+      int savedTimeIndex = response.indexOf("\"savedRemainingTimeSeconds\"");
+      if (savedTimeIndex > 0) {
+        // Try doubleValue first
+        int doubleValueIndex = response.indexOf("\"doubleValue\"", savedTimeIndex);
+        if (doubleValueIndex > 0) {
+          int startQuote = response.indexOf(":", doubleValueIndex + 14);
+          int endComma = response.indexOf(",", startQuote);
+          int endBrace = response.indexOf("}", startQuote);
+          int endPos = (endComma > 0 && endComma < endBrace) ? endComma : endBrace;
+          String savedTimeStr = response.substring(startQuote + 1, endPos);
+          savedTimeStr.trim();
+          latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+        } else {
+          // Try integerValue
+          int intValueIndex = response.indexOf("\"integerValue\"", savedTimeIndex);
+          if (intValueIndex > 0) {
+            int startQuote = response.indexOf("\"", intValueIndex + 15);
+            int endQuote = response.indexOf("\"", startQuote + 1);
+            String savedTimeStr = response.substring(startQuote + 1, endQuote);
+            latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+          }
+        }
+      }
+      
+      // Extract savedTimeDate (date when time was saved)
+      int savedDateIndex = response.indexOf("\"savedTimeDate\"");
+      if (savedDateIndex > 0) {
+        int valueIndex = response.indexOf("\"stringValue\"", savedDateIndex);
+        if (valueIndex > 0) {
+          int startQuote = response.indexOf("\"", valueIndex + 14);
+          int endQuote = response.indexOf("\"", startQuote + 1);
+          String savedDate = response.substring(startQuote + 1, endQuote);
+          
+          // Store the date string (don't interpret it - ESP32 has no RTC!)
+          // Frontend will compare this with today's date
+          latestScan.savedTimeDate = savedDate;
+          
+          Serial.print(F("Saved time date: "));
+          Serial.println(savedDate);
+        }
+      }
+      
       Serial.println(F("✅ REGISTERED"));
       Serial.print(F("Balance: ₱"));
       Serial.println(latestScan.balance, 2);
       Serial.print(F("Last grace period: "));
       Serial.println(latestScan.lastGracePeriodDate.length() > 0 ? latestScan.lastGracePeriodDate : "Never");
+      if (latestScan.savedRemainingTimeSeconds > 0) {
+        Serial.print(F("Saved time: "));
+        Serial.print(latestScan.savedRemainingTimeSeconds);
+        Serial.println(F(" seconds"));
+        Serial.print(F("Saved time date: "));
+        Serial.println(latestScan.savedTimeDate.length() > 0 ? latestScan.savedTimeDate : "Unknown");
+      }
       
       latestScan.hasData = true;
   delete client;
@@ -579,13 +633,15 @@ void handleGetLatest() {
     return;
   }
   
-    // SIMPLE JSON response (now includes attempts, balance, and grace period DATE)
+    // SIMPLE JSON response (now includes attempts, balance, grace period DATE, and saved time)
   String json = "{\"status\":\"success\",\"cardId\":\"" + latestScan.cardId + 
                 "\",\"isRegistered\":" + (latestScan.isRegistered ? "true" : "false") + 
                   ",\"attempts\":" + String(latestScan.attempts) +
                   ",\"attemptsExceeded\":" + (latestScan.attemptsExceeded ? "true" : "false") +
                   ",\"balance\":" + String(latestScan.balance, 2) +
                   ",\"lastGracePeriodDate\":\"" + latestScan.lastGracePeriodDate + "\"" +
+                  ",\"savedRemainingTimeSeconds\":" + String(latestScan.savedRemainingTimeSeconds, 2) +
+                  ",\"savedTimeDate\":\"" + latestScan.savedTimeDate + "\"" +
                 ",\"timestamp\":" + String(latestScan.timestamp) + "}";
   
   server.send(200, "application/json", json);
