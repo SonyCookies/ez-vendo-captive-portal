@@ -76,6 +76,8 @@ struct {
     String lastGracePeriodDate; // Date string (YYYY-MM-DD) - frontend will compare
     float savedRemainingTimeSeconds; // Saved time from previous session
     String savedTimeDate; // Date when time was saved (YYYY-MM-DD) - frontend will compare
+    String status; // Card status: "active" or "blacklisted"
+    bool isBlacklisted; // True if card is blacklisted
   unsigned long timestamp;
 } latestScan;
 
@@ -251,10 +253,11 @@ void startHTTPServer() {
   server.on("/notify-success", HTTP_GET, handleNotifySuccess);
   server.on("/rfid/clear", HTTP_GET, handleClear);
   server.onNotFound(handleNotFound);
-  server.enableCORS(true);
+  
   server.begin();
   
   Serial.println(F("✅ HTTP Server Ready on port 80"));
+  Serial.flush(); // Ensure message is sent
 }
 
 // =====================================================
@@ -304,6 +307,8 @@ void checkRegistrationStatus(String cardId) {
     latestScan.lastGracePeriodDate = "";
     latestScan.savedRemainingTimeSeconds = 0.0;
     latestScan.savedTimeDate = "";
+    latestScan.status = "active"; // Default to active
+    latestScan.isBlacklisted = false;
   
   WiFiClientSecure *client = new WiFiClientSecure;
   if (!client) {
@@ -342,32 +347,93 @@ void checkRegistrationStatus(String cardId) {
     
     // Check if user is registered
     if (response.indexOf("\"document\"") > 0) {
-      // USER IS REGISTERED - Extract balance and grace period info!
+      // USER IS REGISTERED - Extract balance, grace period info, and status!
       latestScan.isRegistered = true;
+      
+      // Extract status (active or blacklisted) - check this FIRST
+      int statusIndex = response.indexOf("\"status\"");
+      if (statusIndex > 0) {
+        int valueIndex = response.indexOf("\"stringValue\"", statusIndex);
+        if (valueIndex > 0) {
+          int startQuote = response.indexOf("\"", valueIndex + 14);
+          int endQuote = response.indexOf("\"", startQuote + 1);
+          String statusStr = response.substring(startQuote + 1, endQuote);
+          latestScan.status = statusStr;
+          latestScan.isBlacklisted = (statusStr == "blacklisted");
+          
+          Serial.print(F("Card status: "));
+          Serial.println(statusStr);
+        }
+      } else {
+        // If status field doesn't exist, default to active
+        latestScan.status = "active";
+        latestScan.isBlacklisted = false;
+      }
       
       // Extract balance
       int balanceIndex = response.indexOf("\"balance\"");
       if (balanceIndex > 0) {
-        // Try doubleValue first
-        int doubleValueIndex = response.indexOf("\"doubleValue\"", balanceIndex);
+        Serial.print(F("Found balance field at index: "));
+        Serial.println(balanceIndex);
+        
+        // Look for doubleValue or integerValue within next 200 characters after "balance"
+        int searchEnd = (balanceIndex + 200 < response.length()) ? balanceIndex + 200 : response.length();
+        String balanceSection = response.substring(balanceIndex, searchEnd);
+        
+        // Try doubleValue first (format: "doubleValue": 116.25 or "doubleValue":116.25)
+        int doubleValueIndex = balanceSection.indexOf("\"doubleValue\"");
         if (doubleValueIndex > 0) {
-          int startQuote = response.indexOf(":", doubleValueIndex + 14);
-          int endComma = response.indexOf(",", startQuote);
-          int endBrace = response.indexOf("}", startQuote);
-          int endPos = (endComma > 0 && endComma < endBrace) ? endComma : endBrace;
-          String balanceStr = response.substring(startQuote + 1, endPos);
-          balanceStr.trim();
-          latestScan.balance = balanceStr.toFloat();
+          // Find the colon after "doubleValue"
+          int colonIndex = balanceSection.indexOf(":", doubleValueIndex + 14);
+          if (colonIndex > 0) {
+            // Skip whitespace after colon
+            int startIndex = colonIndex + 1;
+            while (startIndex < balanceSection.length() && (balanceSection[startIndex] == ' ' || balanceSection[startIndex] == '\t')) {
+              startIndex++;
+            }
+            // Find the end (comma, closing brace, or newline)
+            int endComma = balanceSection.indexOf(",", startIndex);
+            int endBrace = balanceSection.indexOf("}", startIndex);
+            int endNewline = balanceSection.indexOf("\n", startIndex);
+            int endPos = balanceSection.length();
+            if (endComma > startIndex) endPos = endComma;
+            if (endBrace > startIndex && endBrace < endPos) endPos = endBrace;
+            if (endNewline > startIndex && endNewline < endPos) endPos = endNewline;
+            
+            if (endPos > startIndex) {
+              String balanceStr = balanceSection.substring(startIndex, endPos);
+              balanceStr.trim();
+              latestScan.balance = balanceStr.toFloat();
+              Serial.print(F("Balance extracted (doubleValue): "));
+              Serial.println(latestScan.balance, 2);
+            } else {
+              Serial.println(F("⚠️ Could not find end of balance doubleValue"));
+            }
+          } else {
+            Serial.println(F("⚠️ Could not find colon after doubleValue"));
+          }
         } else {
-          // Try integerValue
-          int intValueIndex = response.indexOf("\"integerValue\"", balanceIndex);
+          // Try integerValue (format: "integerValue": "123")
+          int intValueIndex = balanceSection.indexOf("\"integerValue\"");
           if (intValueIndex > 0) {
-            int startQuote = response.indexOf("\"", intValueIndex + 15);
-            int endQuote = response.indexOf("\"", startQuote + 1);
-            String balanceStr = response.substring(startQuote + 1, endQuote);
-            latestScan.balance = balanceStr.toFloat();
+            int startQuote = balanceSection.indexOf("\"", intValueIndex + 15);
+            int endQuote = balanceSection.indexOf("\"", startQuote + 1);
+            if (startQuote > 0 && endQuote > startQuote) {
+              String balanceStr = balanceSection.substring(startQuote + 1, endQuote);
+              latestScan.balance = balanceStr.toFloat();
+              Serial.print(F("Balance extracted (integerValue): "));
+              Serial.println(latestScan.balance, 2);
+            } else {
+              Serial.println(F("⚠️ Could not parse integerValue quotes"));
+            }
+          } else {
+            Serial.println(F("⚠️ Warning: Could not find doubleValue or integerValue for balance"));
+            latestScan.balance = 0.0;
           }
         }
+      } else {
+        Serial.println(F("⚠️ Warning: balance field not found in response"));
+        latestScan.balance = 0.0;
       }
       
       // Extract lastGracePeriodDate (send to frontend for comparison)
@@ -391,24 +457,60 @@ void checkRegistrationStatus(String cardId) {
       // Extract savedRemainingTimeSeconds (saved time from previous session)
       int savedTimeIndex = response.indexOf("\"savedRemainingTimeSeconds\"");
       if (savedTimeIndex > 0) {
-        // Try doubleValue first
-        int doubleValueIndex = response.indexOf("\"doubleValue\"", savedTimeIndex);
+        Serial.print(F("Found savedRemainingTimeSeconds field at index: "));
+        Serial.println(savedTimeIndex);
+        
+        // Look for doubleValue or integerValue within next 200 characters after "savedRemainingTimeSeconds"
+        int searchEnd = (savedTimeIndex + 200 < response.length()) ? savedTimeIndex + 200 : response.length();
+        String savedTimeSection = response.substring(savedTimeIndex, searchEnd);
+        
+        // Try doubleValue first (format: "doubleValue": 1586.0 or "doubleValue":1586)
+        int doubleValueIndex = savedTimeSection.indexOf("\"doubleValue\"");
         if (doubleValueIndex > 0) {
-          int startQuote = response.indexOf(":", doubleValueIndex + 14);
-          int endComma = response.indexOf(",", startQuote);
-          int endBrace = response.indexOf("}", startQuote);
-          int endPos = (endComma > 0 && endComma < endBrace) ? endComma : endBrace;
-          String savedTimeStr = response.substring(startQuote + 1, endPos);
-          savedTimeStr.trim();
-          latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+          int colonIndex = savedTimeSection.indexOf(":", doubleValueIndex + 14);
+          if (colonIndex > 0) {
+            // Skip whitespace after colon
+            int startIndex = colonIndex + 1;
+            while (startIndex < savedTimeSection.length() && (savedTimeSection[startIndex] == ' ' || savedTimeSection[startIndex] == '\t')) {
+              startIndex++;
+            }
+            // Find the end (comma, closing brace, or newline)
+            int endComma = savedTimeSection.indexOf(",", startIndex);
+            int endBrace = savedTimeSection.indexOf("}", startIndex);
+            int endNewline = savedTimeSection.indexOf("\n", startIndex);
+            int endPos = savedTimeSection.length();
+            if (endComma > startIndex) endPos = endComma;
+            if (endBrace > startIndex && endBrace < endPos) endPos = endBrace;
+            if (endNewline > startIndex && endNewline < endPos) endPos = endNewline;
+            
+            if (endPos > startIndex) {
+              String savedTimeStr = savedTimeSection.substring(startIndex, endPos);
+              savedTimeStr.trim();
+              latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+              Serial.print(F("Saved time extracted (doubleValue): "));
+              Serial.println(latestScan.savedRemainingTimeSeconds, 2);
+            } else {
+              Serial.println(F("⚠️ Could not find end of savedTime doubleValue"));
+            }
+          } else {
+            Serial.println(F("⚠️ Could not find colon after savedTime doubleValue"));
+          }
         } else {
-          // Try integerValue
-          int intValueIndex = response.indexOf("\"integerValue\"", savedTimeIndex);
+          // Try integerValue (format: "integerValue": "1586")
+          int intValueIndex = savedTimeSection.indexOf("\"integerValue\"");
           if (intValueIndex > 0) {
-            int startQuote = response.indexOf("\"", intValueIndex + 15);
-            int endQuote = response.indexOf("\"", startQuote + 1);
-            String savedTimeStr = response.substring(startQuote + 1, endQuote);
-            latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+            int startQuote = savedTimeSection.indexOf("\"", intValueIndex + 15);
+            int endQuote = savedTimeSection.indexOf("\"", startQuote + 1);
+            if (startQuote > 0 && endQuote > startQuote) {
+              String savedTimeStr = savedTimeSection.substring(startQuote + 1, endQuote);
+              latestScan.savedRemainingTimeSeconds = savedTimeStr.toFloat();
+              Serial.print(F("Saved time extracted (integerValue): "));
+              Serial.println(latestScan.savedRemainingTimeSeconds, 2);
+            } else {
+              Serial.println(F("⚠️ Could not parse savedTime integerValue quotes"));
+            }
+          } else {
+            Serial.println(F("⚠️ Could not find doubleValue or integerValue for savedRemainingTimeSeconds"));
           }
         }
       }
@@ -432,6 +534,11 @@ void checkRegistrationStatus(String cardId) {
       }
       
       Serial.println(F("✅ REGISTERED"));
+      Serial.print(F("Card status: "));
+      Serial.println(latestScan.status);
+      if (latestScan.isBlacklisted) {
+        Serial.println(F("🚫 CARD IS BLACKLISTED - Access will be denied!"));
+      }
       Serial.print(F("Balance: ₱"));
       Serial.println(latestScan.balance, 2);
       Serial.print(F("Last grace period: "));
@@ -450,10 +557,10 @@ void checkRegistrationStatus(String cardId) {
       return;
     }
     
-    // User NOT registered - Check attempts!
-    Serial.println(F("⚠️ NOT REGISTERED - Checking attempts..."));
+    // User NOT registered - Check attempts and status!
+    Serial.println(F("⚠️ NOT REGISTERED - Checking attempts and status..."));
     
-    // Query for unregistered user document to get attempts
+    // Query for unregistered user document to get attempts and status
     String queryUnregistered = "{\"structuredQuery\":{\"from\":[{\"collectionId\":\"users\"}],\"where\":{\"fieldFilter\":{\"field\":{\"fieldPath\":\"rfidCardId\"},\"op\":\"EQUAL\",\"value\":{\"stringValue\":\"" + cardId + "\"}}}}}";
     
     http.begin(*client, url);
@@ -465,8 +572,28 @@ void checkRegistrationStatus(String cardId) {
     if (code == 200) {
       response = http.getString();
       
-      // Check if document exists and extract attempts
+      // Check if document exists and extract attempts and status
   if (response.indexOf("\"document\"") > 0) {
+        // Extract status (active or blacklisted)
+        int statusIndex = response.indexOf("\"status\"");
+        if (statusIndex > 0) {
+          int valueIndex = response.indexOf("\"stringValue\"", statusIndex);
+          if (valueIndex > 0) {
+            int startQuote = response.indexOf("\"", valueIndex + 14);
+            int endQuote = response.indexOf("\"", startQuote + 1);
+            String statusStr = response.substring(startQuote + 1, endQuote);
+            latestScan.status = statusStr;
+            latestScan.isBlacklisted = (statusStr == "blacklisted");
+            
+            Serial.print(F("Card status: "));
+            Serial.println(statusStr);
+          }
+        } else {
+          // If status field doesn't exist, default to active
+          latestScan.status = "active";
+          latestScan.isBlacklisted = false;
+        }
+        
         // Parse attempts from response (simple string search)
         int attemptsIndex = response.indexOf("\"attempts\"");
         if (attemptsIndex > 0) {
@@ -500,6 +627,9 @@ void checkRegistrationStatus(String cardId) {
     Serial.print(F(" - NOT REGISTERED ("));
     Serial.print(latestScan.attempts);
     Serial.println(F(" attempts)"));
+    if (latestScan.isBlacklisted) {
+      Serial.println(F("🚫 CARD IS BLACKLISTED - Access will be denied!"));
+    }
     
     // Flag for double beep
     shouldBuzzResult = true;
@@ -617,7 +747,10 @@ void grantTrialAccess(String clientIP) {
 // =====================================================
 
 void handleGetLatest() {
-  // No need to manually set CORS - enableCORS(true) already does it!
+  // Set CORS headers
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
   
   // Get client IP directly from the HTTP request (RELIABLE!)
   String clientIP = server.client().remoteIP().toString();
@@ -633,7 +766,7 @@ void handleGetLatest() {
     return;
   }
   
-    // SIMPLE JSON response (now includes attempts, balance, grace period DATE, and saved time)
+    // SIMPLE JSON response (now includes attempts, balance, grace period DATE, saved time, and status)
   String json = "{\"status\":\"success\",\"cardId\":\"" + latestScan.cardId + 
                 "\",\"isRegistered\":" + (latestScan.isRegistered ? "true" : "false") + 
                   ",\"attempts\":" + String(latestScan.attempts) +
@@ -642,6 +775,8 @@ void handleGetLatest() {
                   ",\"lastGracePeriodDate\":\"" + latestScan.lastGracePeriodDate + "\"" +
                   ",\"savedRemainingTimeSeconds\":" + String(latestScan.savedRemainingTimeSeconds, 2) +
                   ",\"savedTimeDate\":\"" + latestScan.savedTimeDate + "\"" +
+                  ",\"cardStatus\":\"" + latestScan.status + "\"" +
+                  ",\"isBlacklisted\":" + (latestScan.isBlacklisted ? "true" : "false") +
                 ",\"timestamp\":" + String(latestScan.timestamp) + "}";
   
   server.send(200, "application/json", json);
@@ -667,20 +802,29 @@ void handleGetLatest() {
 // =====================================================
 
 void handleGetStatus() {
-  // No need to manually set CORS - enableCORS(true) already does it!
+  // Set CORS headers
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
   
   String json = "{\"status\":\"online\",\"uptime\":" + String(millis()/1000) + 
                 ",\"freeHeap\":" + String(ESP.getFreeHeap()) + "}";
   
   server.send(200, "application/json", json);
+  
+  Serial.println(F("📡 Status endpoint called - ESP32 is online"));
 }
 
   // =====================================================
   // HTTP ENDPOINT: GET /access-granted
   // =====================================================
   void handleAccessGranted() {
-    // Frontend polls this to check if internet access was granted
+    // Set CORS headers
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
     
+    // Frontend polls this to check if internet access was granted
     String clientIP = server.client().remoteIP().toString();
     
     // Check if this is the same client that was granted access
@@ -702,7 +846,11 @@ void handleGetStatus() {
 // =====================================================
 
 void handleClear() {
-  // No need to manually set CORS - enableCORS(true) already does it!
+  // Set CORS headers
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  
   latestScan.hasData = false;
     lastAccessGranted = false; // Also clear access flag
   server.send(200, "application/json", "{\"status\":\"cleared\"}");
@@ -717,6 +865,11 @@ void handleClear() {
 // HTTP ENDPOINT: GET /notify-success
 // =====================================================
 void handleNotifySuccess() {
+  // Set CORS headers
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  
   // Frontend calls this after successfully granting access to registered user
   Serial.println(F("📡 Frontend notified: Access granted for registered user"));
   
@@ -727,6 +880,15 @@ void handleNotifySuccess() {
 }
 
 void handleNotFound() {
+  // Handle OPTIONS preflight requests for CORS
+  if (server.method() == HTTP_OPTIONS) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(200, "text/plain", "");
+    return;
+  }
+  
   server.send(404, "application/json", "{\"error\":\"Not found\"}");
 }
 

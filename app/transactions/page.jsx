@@ -27,6 +27,7 @@ const TRANSACTION_TYPE = {
   TOP_UP_PENDING: "Top-up Request",
   TOP_UP_APPROVED: "Top-up Approved",
   TOP_UP_REJECTED: "Top-up Rejected",
+  REFUNDED_MINUTES: "Refund",
 };
 
 // --- Helper Functions ---
@@ -54,6 +55,14 @@ const getTransactionDetails = (type) => {
       colorClass: "text-red-500",
       bgColorClass: "bg-red-500",
       SignIcon: X,
+    };
+  }
+  if (type === TRANSACTION_TYPE.REFUNDED_MINUTES) {
+    return {
+      Icon: BanknoteArrowUp,
+      colorClass: "text-green-500",
+      bgColorClass: "bg-green-500",
+      SignIcon: Plus,
     };
   }
   return {
@@ -150,14 +159,26 @@ function TransactionsContent() {
         
         transactionsSnapshot.forEach((doc) => {
           const data = doc.data();
+          // Determine transaction type
+          let transactionType;
+          if (data.type === "Top-up") {
+            transactionType = TRANSACTION_TYPE.TOP_UP;
+          } else if (data.type === "Refunded Minutes" || data.type === "Refund") {
+            transactionType = TRANSACTION_TYPE.REFUNDED_MINUTES;
+          } else {
+            transactionType = TRANSACTION_TYPE.DEDUCTION;
+          }
+          
           transactionList.push({
             id: doc.id,
-            type: data.type === "Top-up" ? TRANSACTION_TYPE.TOP_UP : TRANSACTION_TYPE.DEDUCTION,
+            type: transactionType,
             amount: data.amount || 0,
             date: data.timestamp?.toDate ? data.timestamp.toDate() : new Date(data.timestamp),
             description: data.description || "",
             minutesPurchased: data.minutesPurchased || null,
             minutesUsed: data.minutesUsed || null,
+            refunded: data.refunded || false,
+            refundedAt: data.refundedAt?.toDate ? data.refundedAt.toDate() : (data.refundedAt ? new Date(data.refundedAt) : null),
           });
         });
 
@@ -266,6 +287,12 @@ function TransactionsContent() {
               {tx.isTopUpRequest && tx.status === "rejected" && (
                 <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold border border-red-300">
                   Rejected
+                </span>
+              )}
+              {/* Refunded Badge */}
+              {tx.refunded && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold border border-blue-300">
+                  Refunded
                 </span>
               )}
             </div>
@@ -438,6 +465,23 @@ function TransactionsContent() {
               <div className="flex flex-col gap-1 p-3 bg-blue-50 border border-blue-200 rounded-lg w-full">
                 <span className="text-xs font-semibold text-gray-700">Minutes Used:</span>
                 <span className="text-sm text-gray-800">{selectedTransaction.minutesUsed} minutes</span>
+              </div>
+            )}
+
+            {/* Refunded Status */}
+            {selectedTransaction.refunded && (
+              <div className="flex flex-col gap-1 p-3 bg-blue-50 border border-blue-300 rounded-lg w-full">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-blue-700">Refunded</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold border border-blue-300">
+                    Refunded
+                  </span>
+                </div>
+                {selectedTransaction.refundedAt && (
+                  <span className="text-xs text-gray-600 mt-1">
+                    Refunded on: {formatModalDate(selectedTransaction.refundedAt)}
+                  </span>
+                )}
               </div>
             )}
 

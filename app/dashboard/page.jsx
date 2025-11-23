@@ -9,15 +9,18 @@ import {
   BanknoteX,
   CircleQuestionMark,
   ChevronRight,
+  ChevronDown,
   BanknoteArrowUp,
   TimerOff,
   TriangleAlert,
   CircleStop,
   CheckCircle,
+  CheckCircle2,
   Minus,
   BanknoteArrowDown,
   WifiOff,
   X,
+  XCircle,
   Clock,
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
@@ -72,6 +75,8 @@ export default function Dashboard() {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [showStopSuccess, setShowStopSuccess] = useState(false);
   const [showTopUpInstructions, setShowTopUpInstructions] = useState(false);
+  const [isTopUpModalClosing, setIsTopUpModalClosing] = useState(false);
+  const [isTopUpModalOpening, setIsTopUpModalOpening] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [showZeroBalanceModal, setShowZeroBalanceModal] = useState(false); // NEW: Show when balance is 0
   const [showTimeRestoredModal, setShowTimeRestoredModal] = useState(false); // Show when saved time is restored
@@ -84,13 +89,52 @@ export default function Dashboard() {
   const [isEndingSession, setIsEndingSession] = useState(false); // Loading state for ending session
   const [revokeSuccess, setRevokeSuccess] = useState(false); // Track if revoke was successful
   
+  // Purchase Confirmation States
+  const [showPurchaseConfirm, setShowPurchaseConfirm] = useState(false);
+  const [selectedMinutes, setSelectedMinutes] = useState(null);
+  const [isPurchasing, setIsPurchasing] = useState(false);
+  const [isPurchaseModalClosing, setIsPurchaseModalClosing] = useState(false);
+  const [isPurchaseModalOpening, setIsPurchaseModalOpening] = useState(false);
+  
+  // Purchase Success/Error Modal States
+  const [showPurchaseSuccess, setShowPurchaseSuccess] = useState(false);
+  const [showPurchaseError, setShowPurchaseError] = useState(false);
+  const [purchaseMessage, setPurchaseMessage] = useState("");
+  
   // Top-up Form States
   const [topUpAmount, setTopUpAmount] = useState("");
   const [topUpReferenceId, setTopUpReferenceId] = useState("");
+  const [topUpPaymentMethod, setTopUpPaymentMethod] = useState("GCASH"); // Default to GCASH
   const [topUpReceipt, setTopUpReceipt] = useState(null);
   const [topUpReceiptPreview, setTopUpReceiptPreview] = useState(null);
   const [isSubmittingTopUp, setIsSubmittingTopUp] = useState(false);
   const [topUpSuccess, setTopUpSuccess] = useState(false);
+  const [showReceiptPreview, setShowReceiptPreview] = useState(false);
+  const [receiptPreviewLoading, setReceiptPreviewLoading] = useState(true);
+
+  // Payment Methods Configuration
+  const PAYMENT_METHODS = {
+    MAYA: {
+      number: "09266301717",
+      name: "Sonny S.",
+      prefix: "MAYA"
+    },
+    GCASH: {
+      number: "09266301717",
+      name: "Sonny S.",
+      prefix: "GCASH"
+    },
+    MARIBANK: {
+      number: "1963 708 5042",
+      name: "SONNY SARCIA",
+      prefix: "MARI"
+    },
+    GOTYME: {
+      number: "0142 0666 6695",
+      name: "SONNY SARCIA",
+      prefix: "GOTYME"
+    }
+  };
 
   // --- CALCULATED STATE / DYNAMIC STYLES ---
   const isLowBalance = userBalance <= 0;
@@ -356,8 +400,15 @@ export default function Dashboard() {
 
   // 4. Top-up / Dismissal Handlers
   const handleTopUp = () => {
+    setIsTopUpModalClosing(false);
+    setIsTopUpModalOpening(false);
     setShowTopUpInstructions(true);
-    setShowLowCreditWarning(false)
+    setShowLowCreditWarning(false);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setIsTopUpModalOpening(true);
+      });
+    });
   };
 
   const finalizeTopUp = async () => {
@@ -397,7 +448,7 @@ export default function Dashboard() {
         ...currentHistory,
       ]);
 
-      setShowTopUpInstructions(false);
+      closeTopUpModal();
 
       // Reset dismissal states
       setIsZeroModalDismissed(false);
@@ -423,6 +474,36 @@ export default function Dashboard() {
     }
   };
 
+  // Remove uploaded receipt
+  const handleRemoveReceipt = () => {
+    setTopUpReceipt(null);
+    setTopUpReceiptPreview(null);
+    // Reset file input
+    const fileInput = document.getElementById('receipt-upload-input');
+    if (fileInput) {
+      fileInput.value = '';
+    }
+  };
+
+  // Handle receipt preview click
+  const handleReceiptPreviewClick = () => {
+    if (topUpReceiptPreview) {
+      setReceiptPreviewLoading(true);
+      setShowReceiptPreview(true);
+    }
+  };
+
+  // Close receipt preview
+  const handleCloseReceiptPreview = () => {
+    setShowReceiptPreview(false);
+    setReceiptPreviewLoading(true);
+  };
+
+  // Handle receipt preview image load
+  const handleReceiptPreviewImageLoad = () => {
+    setReceiptPreviewLoading(false);
+  };
+
   // Submit top-up request
   const handleSubmitTopUp = async () => {
     // Validation
@@ -431,11 +512,16 @@ export default function Dashboard() {
       return;
     }
     if (!topUpReferenceId || topUpReferenceId.trim() === "") {
-      alert("Please enter the GCash reference ID");
+      const selectedMethod = PAYMENT_METHODS[topUpPaymentMethod];
+      alert(`Please enter the ${topUpPaymentMethod} reference ID`);
       return;
     }
     if (!topUpReceipt) {
       alert("Please attach your payment receipt");
+      return;
+    }
+    if (!topUpPaymentMethod || !PAYMENT_METHODS[topUpPaymentMethod]) {
+      alert("Please select a payment method");
       return;
     }
 
@@ -458,33 +544,41 @@ export default function Dashboard() {
       const receiptURL = await getDownloadURL(uploadResult.ref);
       console.log("✅ Receipt URL:", receiptURL);
       
-      // 3. Save top-up request to Firestore (with URL, not base64!)
+      // 3. Generate document ID: PAYMENT_METHOD_PREFIX-(reference number)
+      const selectedMethod = PAYMENT_METHODS[topUpPaymentMethod];
+      const documentId = `${selectedMethod.prefix}-${topUpReferenceId.trim()}`;
+      
+      // 4. Save top-up request to Firestore with custom document ID
       const topUpRequest = {
         userId: rfidFromUrl,
         userName: userData?.fullName || "Unknown",
         userEmail: userData?.email || "N/A",
         amount: parseFloat(topUpAmount),
-        referenceId: topUpReferenceId,
+        referenceId: topUpReferenceId.trim(),
         receiptURL: receiptURL, // Download URL from Firebase Storage
         receiptFileName: topUpReceipt.name,
         receiptStoragePath: `receipts/${rfidFromUrl}/${fileName}`, // For admin reference/deletion
         status: "pending", // pending, approved, rejected
         requestedAt: serverTimestamp(),
-        paymentMethod: "GCash",
+        paymentMethod: topUpPaymentMethod,
+        type: "topup_request", // Type field as requested
       };
 
-      const requestRef = await addDoc(collection(db, "topup_requests"), topUpRequest);
-      console.log("✅ Top-up request submitted:", requestRef.id);
+      // Use setDoc instead of addDoc to allow custom document IDs
+      const requestDocRef = doc(db, "topup_requests", documentId);
+      await setDoc(requestDocRef, topUpRequest);
+      console.log("✅ Top-up request submitted with document ID:", documentId);
 
       // Add to transaction history immediately (so user sees it!)
       setTransactionHistory(prev => [{
-        id: requestRef.id,
+        id: documentId,
         type: TRANSACTION_TYPE.TOP_UP_PENDING,
         amount: parseFloat(topUpAmount),
         date: new Date(),
         status: "pending",
-        referenceId: topUpReferenceId,
+        referenceId: topUpReferenceId.trim(),
         receiptURL: receiptURL,
+        paymentMethod: topUpPaymentMethod,
         isTopUpRequest: true,
       }, ...prev]);
 
@@ -494,9 +588,10 @@ export default function Dashboard() {
       // Reset form after 2 seconds
       setTimeout(() => {
         setTopUpSuccess(false);
-        setShowTopUpInstructions(false);
+        closeTopUpModal();
         setTopUpAmount("");
         setTopUpReferenceId("");
+        setTopUpPaymentMethod("GCASH"); // Reset to default
         setTopUpReceipt(null);
         setTopUpReceiptPreview(null);
         setIsSubmittingTopUp(false);
@@ -519,11 +614,25 @@ export default function Dashboard() {
   };
 
   // Cancel top-up
+  // Close top-up modal with animation
+  const closeTopUpModal = () => {
+    if (isTopUpModalClosing || isSubmittingTopUp) return;
+    setIsTopUpModalOpening(false);
+    setIsTopUpModalClosing(true);
+    setTimeout(() => {
+      setShowTopUpInstructions(false);
+      setTopUpAmount("");
+      setTopUpReferenceId("");
+      setTopUpPaymentMethod("GCASH"); // Reset to default
+      setTopUpReceipt(null);
+      setTopUpReceiptPreview(null);
+      setShowReceiptPreview(false);
+      setIsTopUpModalClosing(false);
+    }, 300);
+  };
+
   const handleCancelTopUp = () => {
-    setShowTopUpInstructions(false);
-    setTopUpAmount("");
-    setTopUpReferenceId("");
-    setTopUpReceipt(null);
+    closeTopUpModal();
     setTopUpReceiptPreview(null);
     setTopUpSuccess(false);
   };
@@ -538,9 +647,8 @@ export default function Dashboard() {
     setShowLowCreditWarning(false);
   };
 
-  // --- PURCHASE TIME PACKAGE ---
-  const purchaseTimePackage = async (minutes) => {
-    const durationSeconds = minutes * 60;
+  // --- HANDLE TIME PACKAGE SELECTION (Show Confirmation) ---
+  const handleTimePackageClick = (minutes) => {
     const cost = minutes * billingRatePerMinute;
     
     // Check if user has sufficient balance
@@ -549,27 +657,121 @@ export default function Dashboard() {
       return;
     }
     
+    // Show confirmation modal with animation
+    setIsPurchaseModalClosing(false);
+    setIsPurchaseModalOpening(false);
+    setSelectedMinutes(minutes);
+    setShowPurchaseConfirm(true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setIsPurchaseModalOpening(true);
+      });
+    });
+  };
+
+  // Close purchase confirmation modal with animation
+  const closePurchaseConfirmModal = () => {
+    if (isPurchaseModalClosing || isPurchasing) return;
+    setIsPurchaseModalOpening(false);
+    setIsPurchaseModalClosing(true);
+    setTimeout(() => {
+      setShowPurchaseConfirm(false);
+      setSelectedMinutes(null);
+      setIsPurchaseModalClosing(false);
+    }, 300);
+  };
+
+  // Generate random alphanumeric string
+  const generateRandomAlphanumeric = (length) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+
+  // Get package number based on minutes
+  const getPackageNumber = (minutes) => {
+    const packageMap = {
+      5: 1,
+      10: 2,
+      30: 3,
+      60: 4,
+    };
+    return packageMap[minutes] || 1; // Default to PACK1 if not found
+  };
+
+  // Helper function to calculate total time from all transactions
+  const calculateTotalTimeFromTransactions = async (userId) => {
+    try {
+      let transactionsSnapshot;
+      try {
+        const transactionsQuery = query(
+          collection(db, "transactions"),
+          where("userId", "==", userId),
+          orderBy("timestamp", "desc")
+        );
+        transactionsSnapshot = await getDocs(transactionsQuery);
+      } catch (error) {
+        // If orderBy fails, try without it
+        console.warn("OrderBy failed, using simple query:", error);
+        const transactionsQuery = query(
+          collection(db, "transactions"),
+          where("userId", "==", userId)
+        );
+        transactionsSnapshot = await getDocs(transactionsQuery);
+      }
+      
+      let totalMinutes = 0;
+      transactionsSnapshot.forEach((doc) => {
+        const data = doc.data();
+        if (data.minutesPurchased) {
+          totalMinutes += Number(data.minutesPurchased) || 0;
+        }
+      });
+      
+      return totalMinutes;
+    } catch (error) {
+      console.error("Error calculating total time from transactions:", error);
+      return 0;
+    }
+  };
+
+  // --- PURCHASE TIME PACKAGE (After Confirmation) ---
+  const purchaseTimePackage = async (minutes) => {
+    const durationSeconds = minutes * 60;
+    const cost = minutes * billingRatePerMinute;
+    
+    // Check if user has sufficient balance (double check)
+    if (userBalance < cost) {
+      alert(`Insufficient balance! You need ₱${cost.toFixed(2)} but only have ₱${userBalance.toFixed(2)}`);
+      setShowPurchaseConfirm(false);
+      setSelectedMinutes(null);
+      return;
+    }
+    
+    setIsPurchasing(true);
+    
     try {
       console.log(`💰 Purchasing ${minutes} minutes for ₱${cost.toFixed(2)}`);
       
-      // Calculate new end time before updating Firestore
-      const now = Date.now();
-      const newEndTime = sessionEndTime 
-        ? sessionEndTime + (durationSeconds * 1000) // Add to existing
-        : now + (durationSeconds * 1000); // Start new
-      
-      // Deduct balance from Firestore AND save sessionEndTime
+      // Deduct balance from Firestore
       const userDocRef = doc(db, "users", rfidFromUrl);
       await updateDoc(userDocRef, {
         balance: increment(-cost),
-        sessionEndTime: newEndTime, // Save session end timestamp
         updatedAt: serverTimestamp(),
       });
       
       // Update local balance
       setUserBalance(prev => prev - cost);
       
-      // Save transaction to Firebase
+      // Generate custom document ID: PACK{number}-{6 random alphanumeric characters}
+      const packageNumber = getPackageNumber(minutes);
+      const randomChars = generateRandomAlphanumeric(6);
+      const customDocumentId = `PACK${packageNumber}-${randomChars}`;
+      
+      // Save transaction to Firebase with custom document ID
       const transactionData = {
         userId: rfidFromUrl,
         type: TRANSACTION_TYPE.DEDUCTION,
@@ -579,29 +781,94 @@ export default function Dashboard() {
         description: `Purchased ${minutes} minutes of internet`,
       };
       
-      const transactionRef = await addDoc(collection(db, "transactions"), transactionData);
-      console.log("✅ Transaction saved to Firestore:", transactionRef.id);
+      const transactionDocRef = doc(db, "transactions", customDocumentId);
+      await setDoc(transactionDocRef, transactionData);
+      console.log("✅ Transaction saved to Firestore with custom ID:", customDocumentId);
       
       // Add to local transaction history
       setTransactionHistory(prev => [{
-        id: transactionRef.id,
+        id: customDocumentId,
         type: TRANSACTION_TYPE.DEDUCTION,
         amount: cost,
         date: new Date(),
         minutesUsed: minutes,
       }, ...prev]);
       
-      console.log("✅ Balance deducted, calling Orange Pi API...");
+      console.log("✅ Balance deducted, calculating new session end time...");
       
-      // Calculate TOTAL time (existing + new purchase)
-      const totalTimeSeconds = activeTimeRemaining + durationSeconds;
-      const totalMinutes = Math.floor(totalTimeSeconds / 60);
+      // Get current user data to check for saved time and grace period
+      const userSnap = await getDoc(userDocRef);
+      const userData = userSnap.exists() ? userSnap.data() : {};
       
-      console.log(`🌐 Requesting ${totalMinutes} minutes TOTAL (${minutes} min added to ${Math.floor(activeTimeRemaining/60)} min existing)`);
+      // Check for saved time
+      const savedRemainingTime = userData.savedRemainingTimeSeconds || 0;
+      const savedTimeDate = userData.savedTimeDate || null;
+      const today = new Date().toISOString().split('T')[0];
+      const isNewDay = savedTimeDate !== today;
       
-      // Call Orange Pi API with TOTAL time
+      // Check for grace period eligibility
+      const lastGracePeriodDate = userData.lastGracePeriodDate || null;
+      const canGrantGracePeriod = lastGracePeriodDate !== today;
+      
+      const now = Date.now();
+      let newEndTime;
+      let actualStartTime = sessionStartTime;
+      let timeToAdd = durationSeconds; // Start with purchased time
+      
+      // If there's saved time and no active session, include it
+      if (savedRemainingTime > 0 && (!sessionEndTime || sessionEndTime <= now)) {
+        timeToAdd += savedRemainingTime;
+        console.log(`💾 Including ${Math.floor(savedRemainingTime / 60)} minutes of saved time`);
+        
+        // If it's a new day and grace period is available, add grace period too
+        if (isNewDay && canGrantGracePeriod) {
+          timeToAdd += 300; // 5 minutes grace period
+          console.log(`🎁 Including 5-minute grace period (new day)`);
+        }
+      }
+      
+      // Calculate new session end time
+      if (sessionEndTime && sessionEndTime > now) {
+        // Active session exists - add new time (including saved time/grace if applicable) to existing end time
+        newEndTime = sessionEndTime + (timeToAdd * 1000);
+        actualStartTime = sessionStartTime || now;
+        console.log(`➕ Adding ${Math.floor(timeToAdd / 60)} minutes to existing session. New end time: ${new Date(newEndTime).toLocaleString()}`);
+      } else {
+        // No active session - start new session from now (includes saved time/grace if applicable)
+        newEndTime = now + (timeToAdd * 1000);
+        actualStartTime = now;
+        console.log(`🆕 Starting new session with ${Math.floor(timeToAdd / 60)} minutes. End time: ${new Date(newEndTime).toLocaleString()}`);
+      }
+      
+      // Calculate remaining time for Orange Pi API call
+      const remainingTimeSeconds = Math.floor((newEndTime - now) / 1000);
+      
+      // Prepare update data
+      const updateData = {
+        sessionStartTime: actualStartTime,
+        sessionEndTime: newEndTime,
+        updatedAt: serverTimestamp(),
+      };
+      
+      // Clear saved time if it was included
+      if (savedRemainingTime > 0 && (!sessionEndTime || sessionEndTime <= now)) {
+        updateData.savedRemainingTimeSeconds = null;
+        updateData.savedTimeDate = null;
+      }
+      
+      // Record grace period if it was granted
+      if (savedRemainingTime > 0 && isNewDay && canGrantGracePeriod && (!sessionEndTime || sessionEndTime <= now)) {
+        updateData.lastGracePeriodDate = today;
+      }
+      
+      // Update Firestore with new session times
+      await updateDoc(userDocRef, updateData);
+      
+      console.log(`🌐 Requesting ${Math.floor(remainingTimeSeconds / 60)} minutes remaining (${remainingTimeSeconds} seconds) from Orange Pi`);
+      
+      // Call Orange Pi API with REMAINING time (not total purchased time)
       // Orange Pi will auto-detect client IP from the HTTP request (like ESP32 does!)
-      const response = await fetch(`http://192.168.1.1:8080/grant-time?duration=${totalTimeSeconds}`, {
+      const response = await fetch(`http://192.168.1.1:8080/grant-time?duration=${remainingTimeSeconds}`, {
         method: 'GET',
         signal: AbortSignal.timeout(5000)
       });
@@ -610,13 +877,10 @@ export default function Dashboard() {
         const data = await response.json();
         console.log("✅ Internet access granted:", data);
         
-        // Set start time if this is a new session, or keep existing if adding time
-        const now = Date.now();
-        const actualStartTime = sessionStartTime || now;
-        
-        // Use the pre-calculated newEndTime
+        // Update local state
         setSessionStartTime(actualStartTime);
         setSessionEndTime(newEndTime);
+        setActiveTimeRemaining(remainingTimeSeconds);
         setHasActiveTime(true);
         setIsSessionActive(true);
         
@@ -627,26 +891,35 @@ export default function Dashboard() {
           sessionEndTime: newEndTime
         }));
         
-        // Also update Firestore with start time if it's a new session
-        if (!sessionStartTime) {
-          const userDocRef = doc(db, "users", rfidFromUrl);
-          await updateDoc(userDocRef, {
-            sessionStartTime: actualStartTime,
-            updatedAt: serverTimestamp(),
-          });
-        }
         console.log("💾 Session updated in storage and Firestore");
         
-        const totalMinutes = Math.floor((newEndTime - now) / 60000);
-        alert(`✅ ${minutes} minutes added!\nTotal time: ${totalMinutes} minutes`);
+        // Close confirmation modal
+        setShowPurchaseConfirm(false);
+        setSelectedMinutes(null);
+        setIsPurchasing(false);
+        
+        // Show success modal
+        const remainingMinutes = Math.floor(remainingTimeSeconds / 60);
+        setPurchaseMessage(`${minutes} ${minutes === 1 ? 'minute' : 'minutes'} added! Remaining time: ${remainingMinutes} ${remainingMinutes === 1 ? 'minute' : 'minutes'}`);
+        setShowPurchaseSuccess(true);
       } else {
         console.error("❌ Failed to grant internet access");
-        alert("❌ Failed to activate internet. Please try again.");
+        setIsPurchasing(false);
+        
+        // Show error modal
+        setPurchaseMessage("Failed to activate internet. Please try again.");
+        setShowPurchaseError(true);
       }
       
     } catch (error) {
       console.error("❌ Error purchasing time:", error);
-      alert("❌ Error purchasing time. Please try again.");
+      setIsPurchasing(false);
+      setShowPurchaseConfirm(false);
+      setSelectedMinutes(null);
+      
+      // Show error modal
+      setPurchaseMessage("Failed to purchase time package. Please try again.");
+      setShowPurchaseError(true);
     }
   };
 
@@ -718,36 +991,6 @@ export default function Dashboard() {
           const currentBalance = data.balance || 0;
           setUserBalance(currentBalance);
           
-          // Restore existing session if it exists and hasn't expired
-          if (data.sessionEndTime && data.sessionEndTime > Date.now()) {
-            const existingEndTime = data.sessionEndTime;
-            const existingStartTime = data.sessionStartTime || (existingEndTime ? new Date(existingEndTime - (data.sessionEndTime - data.sessionStartTime || 0)) : new Date());
-            const remaining = Math.floor((existingEndTime - Date.now()) / 1000);
-            
-            console.log("🔄 Restoring existing session from Firestore");
-            console.log("   Start time:", new Date(existingStartTime).toLocaleString());
-            console.log("   End time:", new Date(existingEndTime).toLocaleString());
-            console.log("   Time remaining:", Math.floor(remaining / 60), "minutes");
-            
-            setSessionStartTime(existingStartTime);
-            setSessionEndTime(existingEndTime);
-            setActiveTimeRemaining(remaining);
-            setHasActiveTime(true);
-            setIsSessionActive(true);
-            
-            // Also save to sessionStorage
-            sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
-              rfid: rfidFromUrl,
-              sessionStartTime: existingStartTime,
-              sessionEndTime: existingEndTime
-            }));
-          }
-          
-          // Show zero balance modal if balance is 0
-          if (currentBalance === 0) {
-            setShowZeroBalanceModal(true);
-          }
-          
           // Check if grace period was already granted today
           const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
           const lastGracePeriodDate = data.lastGracePeriodDate || null;
@@ -767,8 +1010,48 @@ export default function Dashboard() {
           console.log("📅 Saved time date:", savedTimeDate || "Never");
           console.log("🔄 Is new day:", isNewDay);
           
-          // Handle saved time restoration (only if no active session)
-          if (savedRemainingTime > 0 && (!data.sessionEndTime || data.sessionEndTime <= Date.now())) {
+          // PRIORITY 1: Restore existing active session if it exists and hasn't expired
+          // sessionEndTime is the source of truth - it tracks when the session ends
+          if (data.sessionEndTime && data.sessionEndTime > Date.now()) {
+            const existingEndTime = data.sessionEndTime;
+            const existingStartTime = data.sessionStartTime || (existingEndTime ? new Date(existingEndTime - ((existingEndTime - Date.now()) / 1000) * 1000) : new Date());
+            const remaining = Math.floor((existingEndTime - Date.now()) / 1000);
+            
+            console.log("🔄 Restoring existing session from Firestore");
+            console.log("   Start time:", new Date(existingStartTime).toLocaleString());
+            console.log("   End time:", new Date(existingEndTime).toLocaleString());
+            console.log("   Time remaining:", Math.floor(remaining / 60), "minutes");
+            
+            setSessionStartTime(existingStartTime);
+            setSessionEndTime(existingEndTime);
+            setActiveTimeRemaining(remaining);
+            setHasActiveTime(true);
+            setIsSessionActive(true);
+            
+            // Also save to sessionStorage
+            sessionStorage.setItem('ezvendo_active_session', JSON.stringify({
+              rfid: rfidFromUrl,
+              sessionStartTime: existingStartTime,
+              sessionEndTime: existingEndTime
+            }));
+            
+            // Grant access with remaining time
+            try {
+              const response = await fetch(`http://192.168.1.1:8080/grant-time?duration=${remaining}`, {
+                method: 'GET',
+                signal: AbortSignal.timeout(5000)
+              });
+              
+              if (response.ok) {
+                const responseData = await response.json();
+                console.log("✅ Access granted for existing session:", responseData);
+              }
+            } catch (error) {
+              console.error("⚠️ Failed to grant access for existing session:", error);
+            }
+          }
+          // PRIORITY 2: Handle saved time restoration (only if no active session)
+          else if (savedRemainingTime > 0 && (!data.sessionEndTime || data.sessionEndTime <= Date.now())) {
             let totalTimeSeconds = 0;
             let shouldGrantGrace = false;
             
@@ -995,6 +1278,67 @@ export default function Dashboard() {
     }
   }, [rfidFromUrl, loading]);
 
+  // --- LISTEN FOR REFUNDS AND RECALCULATE TIME ---
+  useEffect(() => {
+    if (!rfidFromUrl || !userData) return;
+
+    const checkForRefundAndUpdateTime = async () => {
+      try {
+        // Get current user data to check sessionEndTime
+        const userDocRef = doc(db, "users", rfidFromUrl);
+        const userSnap = await getDoc(userDocRef);
+        if (!userSnap.exists()) return;
+        
+        const currentData = userSnap.data();
+        const currentSessionEndTime = currentData.sessionEndTime;
+        const now = Date.now();
+        
+        // Check if sessionEndTime was updated (likely due to refund)
+        // Compare with local state to detect changes
+        if (currentSessionEndTime && currentSessionEndTime > now) {
+          const currentRemaining = Math.floor((currentSessionEndTime - now) / 1000);
+          const localRemaining = activeTimeRemaining;
+          
+          // If there's a significant difference (more than 10 seconds), update
+          if (Math.abs(currentRemaining - localRemaining) > 10) {
+            console.log("🔄 Refund detected - sessionEndTime changed in Firestore");
+            console.log(`   Local remaining: ${Math.floor(localRemaining / 60)} min, Firestore remaining: ${Math.floor(currentRemaining / 60)} min`);
+            
+            // Update local state to match Firestore
+            const existingStartTime = currentData.sessionStartTime || now;
+            setSessionStartTime(existingStartTime);
+            setSessionEndTime(currentSessionEndTime);
+            setActiveTimeRemaining(currentRemaining);
+            setHasActiveTime(true);
+            setIsSessionActive(true);
+            
+            // Grant access with updated remaining time
+            try {
+              const response = await fetch(`http://192.168.1.1:8080/grant-time?duration=${currentRemaining}`, {
+                method: 'GET',
+                signal: AbortSignal.timeout(5000)
+              });
+              
+              if (response.ok) {
+                const responseData = await response.json();
+                console.log("✅ Access granted after refund:", responseData);
+              }
+            } catch (error) {
+              console.error("⚠️ Failed to grant access after refund:", error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Error checking for refunds:", error);
+      }
+    };
+
+    // Check every 5 seconds for refunds
+    const interval = setInterval(checkForRefundAndUpdateTime, 5000);
+    
+    return () => clearInterval(interval);
+  }, [rfidFromUrl, userData, activeTimeRemaining]);
+
   // --- TIMESTAMP-BASED TIME COUNTDOWN (Accurate even when tab is backgrounded!) ---
   useEffect(() => {
     if (!hasActiveTime || !sessionEndTime) {
@@ -1084,15 +1428,15 @@ export default function Dashboard() {
     return () => clearTimeout(timer);
   }, [isWarningLevel]);
 
-  // Redirection Logic (Session Expired or Stop Confirmed)
+  // Redirection Logic (Session Expired, End Session Success, and Stop Confirmed)
   useEffect(() => {
-    if (showSessionExpiredModal || showStopSuccess) {
+    if (showSessionExpiredModal || showEndSessionSuccess || showStopSuccess) {
       const redirectTimer = setTimeout(() => {
         router.push("/");
       }, 3000);
       return () => clearTimeout(redirectTimer);
     }
-  }, [showSessionExpiredModal, showStopSuccess, router]);
+  }, [showSessionExpiredModal, showEndSessionSuccess, showStopSuccess, router]);
 
   // Utilities
   const recentTransactions = transactionHistory.slice(0, 3);
@@ -1207,56 +1551,58 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-dvh flex justify-center text-sm sm:text-base sm:bg-white">
-      <div className="flex flex-col gap-6 p-3 sm:p-4 md:px-0 w-full max-w-md">
-        {/* header */}
-        <div className="flex items-center justify-between">
-          {/* left */}
-          <div className="flex flex-col">
-            {/* name */}
-            <span className="text-gray-800 text-sm sm:text-base">
-              Hello,{" "}
-              <span className="text-green-500 font-semibold">
-                {userData.firstName || userData.fullName?.split(" ")[0] || "User"}
+    <>
+      <div className="min-h-dvh flex flex-col text-sm sm:text-base relative max-w-md mx-auto w-full">
+        <div className="flex flex-1 flex-col px-3 py-4 sm:p-4 gap-4">
+        {/* Welcome Card - Matching Home Design */}
+        <div className="flex relative rounded-2xl bg-linear-to-r from-green-500 via-green-400 to-green-500 p-5 text-white">
+          <div className="flex flex-1 flex-col gap-2">
+            <span className="text-2xl sm:text-3xl font-bold">
+              Hello, {userData?.firstName || userData?.fullName?.split(" ")[0] || "User"}
+            </span>
+            <div className="flex flex-col">
+              <span className="text-sm sm:text-base font-semibold text-white">
+                RFID: {userData?.rfidCardId || "N/A"}
               </span>
-            </span>
-            <span className="text-gray-500 text-xs">
-              <span className="font-semibold">RFID:</span> {userData.rfidCardId}
-            </span>
+            </div>
           </div>
-          {/* right - Available Credits */}
-          <div className="flex items-center gap-2">
-            <div className="flex flex-col items-end">
-              <span className="text-xs text-gray-500">Balance</span>
-              <span className="text-green-600 font-bold text-base sm:text-lg">
+          <div className="absolute top-3 right-3 rounded-full p-3 bg-green-600/40 shadow-green-600/40">
+            <BanknoteArrowUp className="size-6 sm:size-7" />
+          </div>
+        </div>
+
+        {/* Balance Card */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+            Account Balance
+          </span>
+          
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-300 flex items-center justify-between">
+            <div className="flex flex-col gap-1">
+              <span className="text-xs sm:text-sm text-gray-500">Current Balance</span>
+              <span className="text-2xl sm:text-3xl font-bold text-green-600">
                 ₱{userBalance.toFixed(2)}
               </span>
             </div>
             <button
               onClick={handleTopUp}
-              className="rounded-full border border-green-500 bg-green-500 hover:bg-green-600 active:bg-green-700 cursor-pointer transition-colors duration-150 p-2 text-white"
+              className="rounded-lg border border-green-500 bg-green-500 hover:bg-green-600 active:bg-green-700 cursor-pointer transition-colors duration-150 p-3 text-white"
             >
-              <Plus className="size-4 sm:size-5" />
+              <Plus className="size-5 sm:size-6" />
             </button>
           </div>
         </div>
-        {/* Back to Portal Button */}
-        <div className="flex items-center justify-center">
-          <button
-            onClick={() => router.push("/")}
-            className="text-sm text-gray-600 hover:text-green-600 underline"
-          >
-            ← Back to Portal
-          </button>
-        </div>
 
-        {/* main */}
-        <div className="flex flex-col gap-4">
-          {/* Time remaining display */}
-          {hasActiveTime && (
-            <div className="flex flex-col items-center justify-center gap-3">
-              <div className="col-span-1 flex flex-col items-center justify-center gap-1">
-                <span className="text-gray-500 text-sm sm:text-base">Time Remaining</span>
+        {/* Time Remaining Card */}
+        {hasActiveTime && (
+          <div className="flex flex-col gap-2">
+            <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+              Active Session
+            </span>
+            
+            <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-300 flex flex-col gap-4">
+              <div className="flex flex-col items-center justify-center gap-2">
+                <span className="text-xs sm:text-sm text-gray-500">Time Remaining</span>
                 <span className="font-bold text-4xl sm:text-5xl text-green-500 tabular-nums">
                   {formatTime(activeTimeRemaining)}
                 </span>
@@ -1267,19 +1613,25 @@ export default function Dashboard() {
               {/* End Session Button */}
               <button
                 onClick={handleEndSession}
-                className="flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white rounded-full text-sm font-semibold transition-colors duration-150"
+                className="flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white rounded-lg text-sm font-semibold transition-colors duration-150"
               >
                 <Clock className="size-4" />
                 End Session & Save Time
               </button>
             </div>
-          )}
+          </div>
+        )}
+        
+        {/* Time Package Buttons */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+            {hasActiveTime ? "Add More Time" : "Purchase Internet Time"}
+          </span>
           
-          {/* Time Package Buttons (Always visible - users can add more time anytime) */}
-          <div className="flex flex-col gap-3 bg-white p-4 rounded-2xl border border-gray-300">
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-300 flex flex-col gap-4">
             <div className="text-center">
               <span className="font-semibold text-base">
-                {hasActiveTime ? "Add More Time" : "Purchase Internet Time"}
+                Time Packages
               </span>
               <p className="text-xs text-gray-500 mt-1">
                 Select a time package (₱{billingRatePerMinute.toFixed(2)}/min)
@@ -1289,88 +1641,77 @@ export default function Dashboard() {
             <div className="grid grid-cols-2 gap-3">
               {/* 5 Minutes */}
               <button
-                onClick={() => purchaseTimePackage(5)}
+                onClick={() => handleTimePackageClick(5)}
                 disabled={userBalance < (5 * billingRatePerMinute)}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors"
+                className="flex flex-col items-center justify-center p-4 rounded-lg bg-green-500 hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors duration-150 border border-green-600"
               >
                 <span className="text-2xl font-bold">5</span>
                 <span className="text-xs">minutes</span>
-                <span className="text-xs mt-1">₱{(5 * billingRatePerMinute).toFixed(2)}</span>
+                <span className="text-xs mt-1 font-semibold">₱{(5 * billingRatePerMinute).toFixed(2)}</span>
               </button>
               
               {/* 10 Minutes */}
               <button
-                onClick={() => purchaseTimePackage(10)}
+                onClick={() => handleTimePackageClick(10)}
                 disabled={userBalance < (10 * billingRatePerMinute)}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors"
+                className="flex flex-col items-center justify-center p-4 rounded-lg bg-green-500 hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors duration-150 border border-green-600"
               >
                 <span className="text-2xl font-bold">10</span>
                 <span className="text-xs">minutes</span>
-                <span className="text-xs mt-1">₱{(10 * billingRatePerMinute).toFixed(2)}</span>
+                <span className="text-xs mt-1 font-semibold">₱{(10 * billingRatePerMinute).toFixed(2)}</span>
               </button>
               
               {/* 30 Minutes */}
               <button
-                onClick={() => purchaseTimePackage(30)}
+                onClick={() => handleTimePackageClick(30)}
                 disabled={userBalance < (30 * billingRatePerMinute)}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors"
+                className="flex flex-col items-center justify-center p-4 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors duration-150 border border-blue-600"
               >
                 <span className="text-2xl font-bold">30</span>
                 <span className="text-xs">minutes</span>
-                <span className="text-xs mt-1">₱{(30 * billingRatePerMinute).toFixed(2)}</span>
+                <span className="text-xs mt-1 font-semibold">₱{(30 * billingRatePerMinute).toFixed(2)}</span>
               </button>
               
               {/* 60 Minutes */}
               <button
-                onClick={() => purchaseTimePackage(60)}
+                onClick={() => handleTimePackageClick(60)}
                 disabled={userBalance < (60 * billingRatePerMinute)}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors"
+                className="flex flex-col items-center justify-center p-4 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white transition-colors duration-150 border border-blue-600"
               >
                 <span className="text-2xl font-bold">60</span>
                 <span className="text-xs">minutes</span>
-                <span className="text-xs mt-1">₱{(60 * billingRatePerMinute).toFixed(2)}</span>
+                <span className="text-xs mt-1 font-semibold">₱{(60 * billingRatePerMinute).toFixed(2)}</span>
               </button>
             </div>
           </div>
+        </div>
 
-          {/* Start / Stop Session / N/A */}
-          {/* HIDDEN - Using time packages instead */}
-          {/* <div className="flex items-center justify-center mb-2">
-            <div className="relative flex items-center justify-center size-62">
-              <div
-                className={`absolute rounded-full size-60 ${
-                  isLowBalance ? "bg-gray-100" : `${pulsingBaseColor}-200`
-                } animate-concentric-pulse [animation-delay:-1s] transition-all ease-out`}
-              ></div>
-              <div
-                className={`absolute rounded-full size-48 ${
-                  isLowBalance ? "bg-gray-200" : `${pulsingBaseColor}-300`
-                } animate-concentric-pulse [animation-delay:0s] transition-all ease-out`}
-              ></div>
-
-              <button
-                onClick={handleStartStopSession}
-                disabled={isLowBalance}
-                className={`relative text-xl sm:text-2xl flex items-center justify-center rounded-full size-34 font-semibold shadow transition-colors duration-150 ${sessionButtonFinalClasses}`}
-              >
-                {isLowBalance ? "N/A" : sessionButtonText}
-              </button>
+        {/* Billing Rate Info */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+            Billing Information
+          </span>
+          
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-300">
+            <div className="flex items-center justify-center">
+              <span className="text-gray-600 text-sm">
+                Billing rate: <span className="font-semibold text-gray-800">₱{billingRatePerMinute.toFixed(2)} / min</span>
+              </span>
             </div>
-          </div> */}
-
-          {/* Billing rate - Text only */}
-          <div className="flex items-center justify-center">
-            <span className="text-gray-600 text-sm">
-              Billing rate: <span className="font-semibold text-gray-800">₱{billingRatePerMinute.toFixed(2)} / min</span>
-            </span>
           </div>
+        </div>
 
-          {/* Navigation Tabs */}
-          <div className="flex items-center gap-3 justify-center">
+        {/* Navigation Tabs */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+            Quick Actions
+          </span>
+          
+          <div className="flex items-center gap-3">
             {/* Transactions Button */}
             <Link
               href={`/transactions?rfid=${encodeURIComponent(rfidFromUrl)}`}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 active:bg-green-700 text-white rounded-xl text-sm font-semibold transition-colors duration-150"
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 hover:bg-green-600 active:bg-green-700 text-white rounded-lg text-sm font-semibold transition-colors duration-150"
             >
               <ScrollText className="size-4" />
               Transactions
@@ -1379,15 +1720,30 @@ export default function Dashboard() {
             {/* Session History Button */}
             <Link
               href={`/session-history?rfid=${encodeURIComponent(rfidFromUrl)}`}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-xl text-sm font-semibold transition-colors duration-150"
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-lg text-sm font-semibold transition-colors duration-150"
             >
               <Clock className="size-4" />
               Sessions
             </Link>
           </div>
         </div>
-      </div>
 
+        {/* Back to Portal Button */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs sm:text-sm font-semibold text-gray-500 mt-2">
+            Navigation
+          </span>
+          
+          <button
+            onClick={() => router.push("/")}
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-gray-500 hover:bg-gray-600 active:bg-gray-700 text-white rounded-lg text-sm font-semibold transition-colors duration-150"
+          >
+            <ChevronRight className="size-4 rotate-180" />
+            Back to Portal
+          </button>
+        </div>
+        </div>
+      </div>
 
       {/* Modal for No credits */}
       {/* COMMENTED OUT - Users have grace period, no need to block immediately */}
@@ -1419,138 +1775,245 @@ export default function Dashboard() {
       )} */}
       {/* Modal for Top-up Request Form */}
       {showTopUpInstructions && (
-        <div className="flex min-h-dvh flex-col items-center justify-center fixed inset-0 w-full bg-black/50 p-3 sm:p-4 md:px-0 z-50">
-          <div className="bg-white rounded-2xl py-6 px-4 flex flex-col items-center justify-center gap-5 w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div 
+          className={`fixed inset-0 bg-black/60 flex items-center justify-center p-4 sm:p-5 z-50 overflow-y-auto transition-opacity duration-300 ${
+            isTopUpModalClosing ? "opacity-0" : "opacity-100"
+          }`}
+          onClick={closeTopUpModal}
+        >
+          <div 
+            className={`rounded-2xl relative bg-white w-full max-w-5xl flex flex-col gap-3 mt-2 mb-2 transition-all duration-300 ease-in-out ${
+              isTopUpModalClosing 
+                ? "translate-y-[150vh] opacity-0 scale-95" 
+                : isTopUpModalOpening
+                ? "translate-y-0 opacity-100 scale-100"
+                : "translate-y-[20px] opacity-0 scale-[0.95]"
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* CLOSE BUTTON - Top Middle */}
+            <button
+              onClick={closeTopUpModal}
+              className="absolute top-[-16px] left-1/2 transform -translate-x-1/2 z-10 p-2 cursor-pointer rounded-full bg-white border-2 border-gray-300 hover:bg-gray-50 hover:border-gray-400 active:bg-gray-100 transition-all duration-150 text-gray-600 shadow-lg"
+              disabled={isSubmittingTopUp}
+            >
+              <ChevronDown className="size-5 sm:size-6" />
+            </button>
+
             {topUpSuccess ? (
               // Success State
               <>
-                <div className="bg-green-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
-                  <CheckCircle className="text-green-500 size-6 sm:size-7" />
+                {/* HEADER CARD - Success State */}
+                <div className="flex relative rounded-t-2xl p-4 sm:p-5 text-white bg-linear-to-r from-green-500 via-green-400 to-green-500">
+                  <div className="flex flex-1 flex-col gap-1">
+                    <span className="text-xl sm:text-2xl font-bold">
+                      Request Submitted!
+                    </span>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-xs sm:text-sm font-semibold text-white">
+                        Top-Up Request
+                      </span>
+                      <span className="text-xs text-gray-100">
+                        Your request has been sent to the admin for approval
+                      </span>
+                    </div>
+                  </div>
+                  <div className="absolute top-3 right-3 rounded-full p-2.5 sm:p-3 bg-green-600/40 shadow-green-600/40">
+                    <CheckCircle className="size-5 sm:size-6" />
+                  </div>
                 </div>
-                <div className="flex flex-col text-center gap-2">
-                  <span className="text-base sm:text-lg font-semibold text-green-600">
-                    Request Submitted!
-                  </span>
-                  <span className="text-gray-500 text-xs sm:text-sm">
-                    Your top-up request has been sent to the admin for approval
-                  </span>
+
+                {/* MAIN CONTENT - Success */}
+                <div className="flex flex-col gap-3 p-4 sm:p-5">
+                  <div className="flex flex-col items-center justify-center gap-4 py-4">
+                    <div className="rounded-full p-3 bg-green-500 text-white">
+                      <CheckCircle className="size-6 sm:size-7" />
+                    </div>
+                    <div className="flex flex-col text-center gap-1">
+                      <span className="text-base sm:text-lg font-semibold text-green-600">
+                        Success
+                      </span>
+                      <span className="text-gray-500 text-xs sm:text-sm">
+                        Your top-up request has been sent to the admin for approval
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={closeTopUpModal}
+                    className="w-full bg-green-500 px-4 py-2.5 rounded-lg text-white text-sm font-medium hover:bg-green-500/90 active:bg-green-600 transition-colors duration-150 cursor-pointer"
+                  >
+                    OK
+                  </button>
                 </div>
               </>
             ) : (
               // Form State
               <>
-                <div className="bg-blue-100 size-12 sm:size-13 flex items-center justify-center relative rounded-full z-50">
-                  <BanknoteArrowUp className="text-blue-500 size-6 sm:size-7" />
-                </div>
-
-                <div className="flex flex-col items-center justify-center gap-2">
-                  <div className="flex flex-col text-center">
-                    <span className="text-base sm:text-lg font-semibold">
+                {/* HEADER CARD - Matching Purchase Confirmation Design */}
+                <div className="flex relative rounded-t-2xl p-4 sm:p-5 text-white bg-linear-to-r from-blue-500 via-blue-400 to-blue-500">
+                  <div className="flex flex-1 flex-col gap-1">
+                    <span className="text-xl sm:text-2xl font-bold">
                       Top-Up Request
                     </span>
-                    <span className="text-gray-500 text-xs sm:text-sm">
-                      Fill out the form below after sending payment
-                    </span>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-xs sm:text-sm font-semibold text-white">
+                        Request Form
+                      </span>
+                      <span className="text-xs text-gray-100">
+                        Fill out the form below after sending payment
+                      </span>
+                    </div>
+                  </div>
+                  <div className="absolute top-3 right-3 rounded-full p-2.5 sm:p-3 bg-blue-600/40 shadow-blue-600/40">
+                    <BanknoteArrowUp className="size-5 sm:size-6" />
                   </div>
                 </div>
 
-                {/* Payment Info */}
-                <div className="flex flex-col gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg w-full">
-                  <span className="font-semibold text-sm text-blue-900">Send payment to:</span>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-xs text-gray-800">
-                      <span className="font-semibold">GCash:</span> 09266301717
+                {/* MAIN CONTENT */}
+                <div className="flex flex-col gap-3 p-4 sm:p-5 max-h-[70vh] overflow-y-auto">
+                  {/* Payment Method Selection */}
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs sm:text-sm font-semibold text-gray-500">
+                      Payment Method <span className="text-red-500">*</span>
                     </span>
-                    <span className="text-xs text-gray-800">
-                      <span className="font-semibold">Name:</span> Sonny S.
+                    <select
+                      value={topUpPaymentMethod}
+                      onChange={(e) => setTopUpPaymentMethod(e.target.value)}
+                      className="px-3 sm:px-4 py-2 w-full border border-gray-300 outline-none rounded-lg focus:border-green-500 placeholder:text-gray-500 transition-colors duration-150"
+                      disabled={isSubmittingTopUp}
+                    >
+                      <option value="MAYA">MAYA</option>
+                      <option value="GCASH">GCASH</option>
+                      <option value="MARIBANK">MARIBANK</option>
+                      <option value="GOTYME">GOTYME</option>
+                    </select>
+                  </div>
+
+                  {/* Payment Info */}
+                  <div className="flex flex-col gap-2 p-2.5 sm:p-3 rounded-lg border border-blue-300 bg-blue-50">
+                    <span className="text-xs sm:text-sm font-semibold text-blue-900">Send payment to:</span>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-gray-800">
+                        <span className="font-semibold">{topUpPaymentMethod}:</span> {PAYMENT_METHODS[topUpPaymentMethod]?.number}
+                      </span>
+                      <span className="text-xs text-gray-800">
+                        <span className="font-semibold">Name:</span> {PAYMENT_METHODS[topUpPaymentMethod]?.name}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Form Fields Section */}
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs sm:text-sm font-semibold text-gray-500">
+                      Request Details
                     </span>
-                  </div>
-                  <span className="text-xs text-orange-600 font-semibold mt-1">
-                    ⚠️ GCash payments only
-                  </span>
-                </div>
 
-                {/* Form Fields */}
-                <div className="flex flex-col gap-4 w-full">
-                  {/* Amount */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-semibold text-gray-700">
-                      Amount (₱) <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="number"
-                      value={topUpAmount}
-                      onChange={(e) => setTopUpAmount(e.target.value)}
-                      placeholder="e.g. 100"
-                      min="1"
-                      step="0.01"
-                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={isSubmittingTopUp}
-                    />
-                  </div>
-
-                  {/* Reference ID */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-semibold text-gray-700">
-                      GCash Reference ID <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={topUpReferenceId}
-                      onChange={(e) => setTopUpReferenceId(e.target.value)}
-                      placeholder="e.g. 1234567890"
-                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={isSubmittingTopUp}
-                    />
-                  </div>
-
-                  {/* Receipt Upload */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-sm font-semibold text-gray-700">
-                      Payment Receipt <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleReceiptUpload}
-                      className="text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                      disabled={isSubmittingTopUp}
-                    />
-                    {topUpReceiptPreview && (
-                      <div className="mt-2">
-                        <img
-                          src={topUpReceiptPreview}
-                          alt="Receipt preview"
-                          className="w-full h-32 object-cover rounded-lg border border-gray-200"
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                      {/* Amount */}
+                      <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                        <span className="text-gray-500 text-xs mb-0.5">
+                          Amount (₱) <span className="text-red-500">*</span>
+                        </span>
+                        <input
+                          type="number"
+                          value={topUpAmount}
+                          onChange={(e) => setTopUpAmount(e.target.value)}
+                          placeholder="e.g. 100"
+                          min="1"
+                          step="0.01"
+                          className="font-semibold text-xs sm:text-sm border-0 outline-none bg-transparent p-0"
+                          disabled={isSubmittingTopUp}
                         />
                       </div>
-                    )}
-                  </div>
-                </div>
 
-                {/* Buttons */}
-                <div className="flex items-center gap-2 w-full">
-                  <button
-                    onClick={handleCancelTopUp}
-                    disabled={isSubmittingTopUp}
-                    className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-gray-300 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleSubmitTopUp}
-                    disabled={isSubmittingTopUp}
-                    className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
-                  >
-                    {isSubmittingTopUp ? (
-                      <>
-                        <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                        Uploading...
-                      </>
-                    ) : (
-                      "Submit Request"
-                    )}
-                  </button>
+                      {/* Reference ID */}
+                      <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                        <span className="text-gray-500 text-xs mb-0.5">
+                          {topUpPaymentMethod} Reference ID <span className="text-red-500">*</span>
+                        </span>
+                        <input
+                          type="text"
+                          value={topUpReferenceId}
+                          onChange={(e) => setTopUpReferenceId(e.target.value)}
+                          placeholder="Enter reference number"
+                          className="font-semibold text-xs sm:text-sm border-0 outline-none bg-transparent p-0"
+                          disabled={isSubmittingTopUp}
+                        />
+                      </div>
+                    </div>
+
+                      {/* Receipt Upload */}
+                      <div className="flex flex-col gap-2 p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                        <span className="text-gray-500 text-xs mb-0.5">
+                          Payment Receipt <span className="text-red-500">*</span>
+                        </span>
+                        <input
+                          id="receipt-upload-input"
+                          type="file"
+                          accept="image/*"
+                          onChange={handleReceiptUpload}
+                          className="text-xs sm:text-sm text-gray-600 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
+                          disabled={isSubmittingTopUp}
+                        />
+                        {topUpReceiptPreview && (
+                          <div className="mt-2 relative rounded-lg overflow-hidden border border-gray-300 group">
+                            {/* Remove Button */}
+                            <button
+                              onClick={handleRemoveReceipt}
+                              disabled={isSubmittingTopUp}
+                              className="absolute top-2 right-2 z-10 p-1.5 rounded-full bg-red-500 text-white hover:bg-red-600 active:bg-red-700 transition-colors duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                              title="Remove receipt"
+                            >
+                              <X className="size-4" />
+                            </button>
+                            
+                            {/* Clickable Receipt Preview */}
+                            <div
+                              onClick={handleReceiptPreviewClick}
+                              className="cursor-pointer hover:opacity-90 transition-opacity duration-150"
+                            >
+                              <img
+                                src={topUpReceiptPreview}
+                                alt="Receipt preview"
+                                className="w-full h-48 object-contain"
+                              />
+                              {/* Overlay hint */}
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/10 transition-colors duration-150">
+                                <span className="text-white text-xs font-semibold opacity-0 group-hover:opacity-100 transition-opacity duration-150 bg-black/50 px-3 py-1.5 rounded-lg">
+                                  Click to preview
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-col gap-2 pt-1">
+                    <button
+                      onClick={handleSubmitTopUp}
+                      disabled={isSubmittingTopUp}
+                      className="w-full bg-green-500 px-4 py-2.5 rounded-lg text-white text-sm font-medium hover:bg-green-500/90 active:bg-green-600 transition-colors duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      {isSubmittingTopUp ? (
+                        <>
+                          <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          Uploading...
+                        </>
+                      ) : (
+                        "Submit Request"
+                      )}
+                    </button>
+                    <button
+                      onClick={handleCancelTopUp}
+                      disabled={isSubmittingTopUp}
+                      className="w-full bg-gray-500 px-4 py-2.5 rounded-lg text-white text-sm font-medium hover:bg-gray-500/90 active:bg-gray-600 transition-colors duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </>
             )}
@@ -1613,14 +2076,23 @@ export default function Dashboard() {
                     Connect again by tapping your RFID Card
                   </span>
                 </div>
-
-                <div className="flex items-center justify-center py-2">
-                  <span className="text-gray-500 text-xs sm:text-sm animate-pulse">
-                    Redirecting to portal...
-                  </span>
-                </div>
               </div>
             </div>
+            
+            <div className="flex items-center justify-center py-2">
+              <span className="text-gray-500 text-xs sm:text-sm animate-pulse">
+                Redirecting to portal...
+              </span>
+            </div>
+            
+            {/* Back to Portal Button */}
+            <button
+              onClick={() => router.push("/")}
+              className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
+            >
+              <ChevronRight className="size-4 rotate-180" />
+              Back to Portal
+            </button>
           </div>
         </div>
       )}
@@ -2076,11 +2548,18 @@ export default function Dashboard() {
               </div>
             )}
 
+            <div className="flex items-center justify-center py-2">
+              <span className="text-gray-500 text-xs sm:text-sm animate-pulse">
+                Redirecting to portal...
+              </span>
+            </div>
+            
             <button
-              onClick={() => setShowEndSessionSuccess(false)}
+              onClick={() => router.push("/")}
               className="cursor-pointer text-sm sm:text-base w-full px-4 py-2 border border-green-500 bg-green-500 text-white hover:border-green-600 hover:bg-green-600 active:border-green-700 active:bg-green-700 transition-colors duration-150 rounded-full flex items-center justify-center gap-2"
             >
-              Got It
+              <ChevronRight className="size-4 rotate-180" />
+              Back to Portal
             </button>
           </div>
         </div>
@@ -2117,6 +2596,216 @@ export default function Dashboard() {
           </div>
         </div>
       )}
-    </div>
+      
+      {/* Purchase Confirmation Modal */}
+      {showPurchaseConfirm && selectedMinutes && (
+        <div 
+          className={`fixed inset-0 bg-black/60 flex items-center justify-center p-4 sm:p-5 z-50 overflow-y-auto transition-opacity duration-300 ${
+            isPurchaseModalClosing ? "opacity-0" : "opacity-100"
+          }`}
+          onClick={closePurchaseConfirmModal}
+        >
+          <div 
+            className={`rounded-2xl relative bg-white w-full max-w-5xl flex flex-col gap-3 mt-2 mb-2 transition-all duration-300 ease-in-out ${
+              isPurchaseModalClosing 
+                ? "translate-y-[150vh] opacity-0 scale-95" 
+                : isPurchaseModalOpening
+                ? "translate-y-0 opacity-100 scale-100"
+                : "translate-y-[20px] opacity-0 scale-[0.95]"
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* CLOSE BUTTON - Top Middle */}
+            <button
+              onClick={closePurchaseConfirmModal}
+              className="absolute top-[-16px] left-1/2 transform -translate-x-1/2 z-10 p-2 cursor-pointer rounded-full bg-white border-2 border-gray-300 hover:bg-gray-50 hover:border-gray-400 active:bg-gray-100 transition-all duration-150 text-gray-600 shadow-lg"
+              disabled={isPurchasing}
+            >
+              <ChevronDown className="size-5 sm:size-6" />
+            </button>
+
+            {/* HEADER CARD - Matching User Modal Design */}
+            <div className="flex relative rounded-t-2xl p-4 sm:p-5 text-white bg-linear-to-r from-green-500 via-green-400 to-green-500">
+              <div className="flex flex-1 flex-col gap-1">
+                <span className="text-xl sm:text-2xl font-bold">
+                  Confirm Purchase
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs sm:text-sm font-semibold text-white">
+                    Time Package: {selectedMinutes} {selectedMinutes === 1 ? 'minute' : 'minutes'}
+                  </span>
+                  <span className="text-xs text-gray-100">
+                    Review your purchase details below
+                  </span>
+                </div>
+              </div>
+              <div className="absolute top-3 right-3 rounded-full p-2.5 sm:p-3 bg-green-600/40 shadow-green-600/40">
+                <BanknoteArrowUp className="size-5 sm:size-6" />
+              </div>
+            </div>
+
+            {/* MAIN CONTENT */}
+            <div className="flex flex-col gap-3 p-4 sm:p-5">
+              {/* Purchase Details Section */}
+              <div className="flex flex-col gap-2">
+                <span className="text-xs sm:text-sm font-semibold text-gray-500">
+                  Purchase Details
+                </span>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                  <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                    <span className="text-gray-500 text-xs mb-0.5">
+                      Time Package
+                    </span>
+                    <span className="font-semibold text-xs sm:text-sm">
+                      {selectedMinutes} {selectedMinutes === 1 ? 'minute' : 'minutes'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                    <span className="text-gray-500 text-xs mb-0.5">
+                      Cost
+                    </span>
+                    <span className="font-semibold text-xs sm:text-sm text-green-600">
+                      ₱{(selectedMinutes * billingRatePerMinute).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                    <span className="text-gray-500 text-xs mb-0.5">
+                      Current Balance
+                    </span>
+                    <span className="font-semibold text-xs sm:text-sm">
+                      ₱{userBalance.toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col p-2.5 sm:p-3 rounded-lg border border-gray-300">
+                    <span className="text-gray-500 text-xs mb-0.5">
+                      Balance After Purchase
+                    </span>
+                    <span className={`font-semibold text-xs sm:text-sm ${
+                      (userBalance - (selectedMinutes * billingRatePerMinute)) < 0 
+                        ? 'text-red-600' 
+                        : 'text-gray-800'
+                    }`}>
+                      ₱{(userBalance - (selectedMinutes * billingRatePerMinute)).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  onClick={() => purchaseTimePackage(selectedMinutes)}
+                  disabled={isPurchasing || userBalance < (selectedMinutes * billingRatePerMinute)}
+                  className="w-full bg-green-500 px-4 py-2.5 rounded-lg text-white text-sm font-medium hover:bg-green-500/90 active:bg-green-600 transition-colors duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isPurchasing ? "Processing..." : "Confirm Purchase"}
+                </button>
+                <button
+                  onClick={closePurchaseConfirmModal}
+                  disabled={isPurchasing}
+                  className="w-full bg-gray-500 px-4 py-2.5 rounded-lg text-white text-sm font-medium hover:bg-gray-500/90 active:bg-gray-600 transition-colors duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Purchase Success Modal */}
+      {showPurchaseSuccess && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 sm:p-5 z-[70] overflow-y-auto">
+          <div className="rounded-2xl bg-white p-4 sm:p-5 w-full max-w-md flex flex-col gap-6 mt-2 mb-2">
+            <div className="flex flex-col items-center justify-center gap-4 pt-2">
+              <div className="rounded-full p-3 bg-green-500 text-white">
+                <CheckCircle2 className="size-6 sm:size-7" />
+              </div>
+              <div className="flex flex-col text-center gap-1">
+                <span className="text-base sm:text-lg font-semibold text-green-500">
+                  Success
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm">
+                  {purchaseMessage}
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowPurchaseSuccess(false)}
+              className="rounded-lg w-full cursor-pointer px-4 py-2 border border-green-500 bg-green-500 text-white hover:bg-green-500/90 active:bg-green-600 transition-colors duration-150"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Purchase Error Modal */}
+      {showPurchaseError && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 sm:p-5 z-[70] overflow-y-auto">
+          <div className="rounded-2xl bg-white p-4 sm:p-5 w-full max-w-md flex flex-col gap-6 mt-2 mb-2">
+            <div className="flex flex-col items-center justify-center gap-4 pt-2">
+              <div className="rounded-full p-3 bg-red-500 text-white">
+                <XCircle className="size-6 sm:size-7" />
+              </div>
+              <div className="flex flex-col text-center gap-1">
+                <span className="text-base sm:text-lg font-semibold text-red-500">
+                  Error
+                </span>
+                <span className="text-gray-500 text-xs sm:text-sm">
+                  {purchaseMessage}
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowPurchaseError(false)}
+              className="rounded-lg w-full cursor-pointer px-4 py-2 border border-red-500 bg-red-500 text-white hover:bg-red-500/90 active:bg-red-600 transition-colors duration-150"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Receipt Preview Modal */}
+      {showReceiptPreview && topUpReceiptPreview && (
+        <div 
+          className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 sm:p-5 z-[60] overflow-y-auto"
+          onClick={handleCloseReceiptPreview}
+        >
+          <div className="relative max-w-7xl max-h-[90vh] w-full flex items-center justify-center">
+            {/* Close button */}
+            <button
+              onClick={handleCloseReceiptPreview}
+              className="absolute top-4 right-4 p-2 cursor-pointer rounded-full bg-white/10 hover:bg-white/20 active:bg-white/30 transition-colors duration-150 text-white z-10"
+            >
+              <X className="size-5 sm:size-6" />
+            </button>
+
+            {/* Image Container */}
+            <div className="relative w-full flex items-center justify-center">
+              {receiptPreviewLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/50 animate-pulse">
+                  <div className="w-16 h-16 border-4 border-white border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              )}
+              <img
+                src={topUpReceiptPreview}
+                alt="Receipt Preview"
+                className={`max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl ${receiptPreviewLoading ? 'opacity-0' : 'opacity-100'} transition-opacity duration-300`}
+                onLoad={handleReceiptPreviewImageLoad}
+                onError={() => setReceiptPreviewLoading(false)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
