@@ -30,6 +30,40 @@ import { db, storage } from "@/app/config/firebase";
 import { doc, getDoc, updateDoc, increment, serverTimestamp, setDoc, collection, addDoc, query, where, getDocs, orderBy } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
+// Suppress expected network errors in captive portal environment
+if (typeof window !== 'undefined') {
+  // Suppress Firestore connection errors (expected in captive portal)
+  const originalError = console.error;
+  console.error = (...args) => {
+    const errorMessage = args[0]?.toString() || '';
+    // Suppress expected network errors
+    if (
+      errorMessage.includes('ERR_INTERNET_DISCONNECTED') ||
+      errorMessage.includes('firestore.googleapis.com') ||
+      errorMessage.includes('WebSocket connection') ||
+      errorMessage.includes('cleardot.gif') ||
+      errorMessage.includes('net::ERR_INTERNET_DISCONNECTED')
+    ) {
+      // Silently ignore expected network errors in captive portal
+      return;
+    }
+    originalError.apply(console, args);
+  };
+
+  // Suppress unhandled promise rejections for network errors
+  window.addEventListener('unhandledrejection', (event) => {
+    const errorMessage = event.reason?.message || event.reason?.toString() || '';
+    if (
+      errorMessage.includes('ERR_INTERNET_DISCONNECTED') ||
+      errorMessage.includes('firestore.googleapis.com') ||
+      errorMessage.includes('Failed to fetch') ||
+      errorMessage.includes('NetworkError')
+    ) {
+      event.preventDefault(); // Suppress the error
+    }
+  });
+}
+
 // CONSTANTS
 const INITIAL_BALANCE = 0.0;
 const LOW_BALANCE_THRESHOLD = 10.0;
@@ -947,7 +981,12 @@ export default function Dashboard() {
         }
         setConfigLoading(false);
       } catch (error) {
-        console.error("Error fetching system config:", error);
+        // Suppress network errors in captive portal environment
+        if (error?.code === 'unavailable' || error?.message?.includes('ERR_INTERNET_DISCONNECTED') || error?.message?.includes('Failed to fetch')) {
+          console.warn("⚠️ Network unavailable, using default billing rate");
+        } else {
+          console.error("Error fetching system config:", error);
+        }
         setBillingRatePerMinute(0.5); // Fallback to default
         setConfigLoading(false);
       }
@@ -1329,6 +1368,11 @@ export default function Dashboard() {
           }
         }
       } catch (error) {
+        // Suppress network errors in captive portal environment
+        if (error?.code === 'unavailable' || error?.message?.includes('ERR_INTERNET_DISCONNECTED') || error?.message?.includes('Failed to fetch')) {
+          // Silently handle network errors - expected in captive portal
+          return;
+        }
         console.error("Error checking for refunds:", error);
       }
     };

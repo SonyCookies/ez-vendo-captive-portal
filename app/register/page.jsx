@@ -7,11 +7,12 @@ import {
   CheckCircle,
   Info,
 } from "lucide-react"; // Imported new icons
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation"; // For redirection and URL params
 import Link from "next/link";
-import { db } from "@/app/config/firebase";
+import { db, auth } from "@/app/config/firebase";
 import { collection, addDoc, doc, updateDoc, serverTimestamp, getDoc, setDoc } from "firebase/firestore";
+import { createUserWithEmailAndPassword } from "firebase/auth";
 
 // Helper function to validate email format
 const validateEmail = (email) => {
@@ -46,7 +47,7 @@ const hashPassword = async (password) => {
 // --- Timer Constants ---
 const REGISTRATION_TIME_LIMIT_SECONDS = 300; // 5 minutes (not 10)
 
-export default function Register() {
+function RegisterContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -282,10 +283,35 @@ export default function Register() {
     console.log("   isRedirectingRef set to TRUE");
 
     try {
-      // Hash password before storing (simple hash for now - use bcrypt in production)
+      const email = formData.email.toLowerCase().trim();
+      
+      // Step 1: Create user in Firebase Authentication
+      let authUser;
+      try {
+        authUser = await createUserWithEmailAndPassword(auth, email, formData.password);
+        console.log("✅ Firebase Authentication user created:", authUser.user.uid);
+      } catch (authError) {
+        console.error("❌ Firebase Authentication error:", authError);
+        const code = authError.code || "auth/error";
+        let message = "Failed to create authentication account";
+        
+        if (code === "auth/email-already-in-use") {
+          message = "This email is already registered. Please use a different email or try logging in.";
+        } else if (code === "auth/invalid-email") {
+          message = "Invalid email address format.";
+        } else if (code === "auth/weak-password") {
+          message = "Password is too weak. Please use a stronger password.";
+        } else if (code === "auth/operation-not-allowed") {
+          message = "Email/password accounts are not enabled. Please contact support.";
+        }
+        
+        throw new Error(message);
+      }
+      
+      // Step 2: Hash password before storing (simple hash for now - use bcrypt in production)
       const hashedPassword = await hashPassword(formData.password);
       
-      // Update the existing document (using RFID as document ID) to mark as registered
+      // Step 3: Update the existing document (using RFID as document ID) to mark as registered
       const userDocRef = doc(db, "users", formData.rfid);
       
       const userData = {
@@ -296,10 +322,11 @@ export default function Register() {
         fullName: `${formData.firstName} ${formData.lastName}`,
         firstName: formData.firstName,
         lastName: formData.lastName,
-        email: formData.email.toLowerCase().trim(),
+        email: email,
         
         // Authentication (for web portal access)
         passwordHash: hashedPassword,
+        authUid: authUser.user.uid, // Store Firebase Auth UID for reference
         
         // Account Information
         balance: 0,
@@ -327,7 +354,8 @@ export default function Register() {
         registrationTimerStart: null, // Clear timer
       }, { merge: true });
       
-      console.log("✅ User registered successfully:", formData.rfid);
+      console.log("✅ User registered successfully in Firestore:", formData.rfid);
+      console.log("✅ Firebase Auth UID:", authUser.user.uid);
       console.log("✅ isRedirectingRef is:", isRedirectingRef.current);
       console.log("✅ registrationSuccess is:", true);
 
@@ -669,5 +697,33 @@ export default function Register() {
         </form>
       </div>
     </div>
+  );
+}
+
+// Loading fallback component
+function RegisterLoading() {
+  return (
+    <div className="min-h-dvh text-sm sm:text-base flex flex-col items-center justify-center p-3 sm:p-4 md:px-0 bg-white">
+      <div className="flex flex-col gap-5 sm:gap-6 w-full max-w-md">
+        <div className="flex text-center flex-col pt-2">
+          <span className="text-xl sm:text-2xl font-bold">
+            Loading <span className="text-green-500">Registration</span>
+          </span>
+          <span className="text-gray-500 text-sm">Please wait...</span>
+        </div>
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="size-8 text-green-500 animate-spin" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Main export with Suspense boundary
+export default function Register() {
+  return (
+    <Suspense fallback={<RegisterLoading />}>
+      <RegisterContent />
+    </Suspense>
   );
 }

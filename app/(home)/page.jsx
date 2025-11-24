@@ -22,8 +22,6 @@ import {
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useESP8266Polling } from "@/app/hooks/useESP8266Polling";
-import { db } from "@/app/config/firebase";
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
 
 // Modal states
 const MODAL_STATE = {
@@ -136,46 +134,46 @@ export default function Home() {
         console.log("🌐 Granting internet access for registered user...");
         
         try {
-          // Get user data from Firestore to check for active session, saved time, etc.
-          const userDocRef = doc(db, "users", cardId);
-          const userSnap = await getDoc(userDocRef);
-          
+          // ESP32 has already provided all necessary data in cardData.rawData
+          // Calculate duration based on ESP32-provided data
           let durationSeconds = 300; // Default: 5-minute grace period
           
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            const now = Date.now();
+          // Use data from ESP32 (already fetched from Firestore by ESP32)
+          const { 
+            sessionEndTime = null,
+            savedRemainingTimeSeconds = 0,
+            savedTimeDate = "",
+            lastGracePeriodDate = ""
+          } = cardData.rawData || cardData;
+          
+          const now = Date.now();
+          
+          // Check if there's an active session (from ESP32 data)
+          if (sessionEndTime && sessionEndTime > now) {
+            // Active session exists - use remaining time
+            durationSeconds = Math.floor((sessionEndTime - now) / 1000);
+            console.log(`🔄 Active session found - using remaining time: ${Math.floor(durationSeconds / 60)} minutes`);
+          } else {
+            // No active session - check for saved time and grace period (from ESP32 data)
+            const isNewDay = savedTimeDate !== today && savedTimeDate !== "";
+            const canGrantGrace = lastGracePeriodDate !== today;
             
-            // Check if there's an active session
-            if (userData.sessionEndTime && userData.sessionEndTime > now) {
-              // Active session exists - use remaining time
-              durationSeconds = Math.floor((userData.sessionEndTime - now) / 1000);
-              console.log(`🔄 Active session found - using remaining time: ${Math.floor(durationSeconds / 60)} minutes`);
-            } else {
-              // No active session - check for saved time and grace period
-              const savedTime = userData.savedRemainingTimeSeconds || 0;
-              const savedTimeDate = userData.savedTimeDate || null;
-              const lastGracePeriodDate = userData.lastGracePeriodDate || null;
-              const isNewDay = savedTimeDate !== today && savedTimeDate !== "";
-              const canGrantGrace = lastGracePeriodDate !== today;
-              
-              if (savedTime > 0) {
-                durationSeconds = savedTime;
-                if (isNewDay && canGrantGrace) {
-                  durationSeconds += 300; // Add grace period
-                  console.log(`💾 Including saved time (${Math.floor(savedTime / 60)} min) + grace period (5 min) = ${Math.floor(durationSeconds / 60)} min`);
-                } else {
-                  console.log(`💾 Including saved time: ${Math.floor(savedTime / 60)} minutes`);
-                }
-              } else if (canGrantGrace) {
-                // No saved time, but grace period available
-                durationSeconds = 300; // 5 minutes grace
-                console.log(`🎁 Granting grace period: 5 minutes`);
+            if (savedRemainingTimeSeconds > 0) {
+              durationSeconds = savedRemainingTimeSeconds;
+              if (isNewDay && canGrantGrace) {
+                durationSeconds += 300; // Add grace period
+                console.log(`💾 Including saved time (${Math.floor(savedRemainingTimeSeconds / 60)} min) + grace period (5 min) = ${Math.floor(durationSeconds / 60)} min`);
               } else {
-                // No saved time, no grace period
-                durationSeconds = 0;
-                console.log(`⚠️ No time available (no saved time, grace period used)`);
+                console.log(`💾 Including saved time: ${Math.floor(savedRemainingTimeSeconds / 60)} minutes`);
               }
+            } else if (canGrantGrace) {
+              // No saved time, but grace period available
+              durationSeconds = 300; // 5 minutes grace
+              console.log(`🎁 Granting grace period: 5 minutes`);
+            } else {
+              // No saved time, no grace period
+              durationSeconds = 0;
+              console.log(`⚠️ No time available (no saved time, grace period used)`);
             }
           }
           
@@ -239,32 +237,9 @@ export default function Home() {
           return;
         }
         
-        try {
-          const userDocRef = doc(db, "users", cardId);
-          const userSnap = await getDoc(userDocRef);
-          
-          const newAttempts = attempts + 1;
-          
-          if (userSnap.exists()) {
-            await updateDoc(userDocRef, {
-              attempts: newAttempts,
-              lastAttempt: serverTimestamp(),
-            });
-          } else {
-            await setDoc(userDocRef, {
-              rfidCardId: cardId,
-              isRegistered: false,
-              attempts: newAttempts,
-              firstScan: serverTimestamp(),
-              lastAttempt: serverTimestamp(),
-            });
-          }
-          
-          console.log(`📊 Updated Firestore: ${newAttempts}/${MAX_ATTEMPTS} attempts`);
-          
-        } catch (error) {
-          console.error("❌ Error updating attempts:", error);
-        }
+        // Note: ESP32 already handles updating attempts in Firestore
+        // The frontend doesn't need to update Firestore since ESP32 has internet access
+        console.log(`📊 Attempts tracked by ESP32: ${attempts}/${MAX_ATTEMPTS}`);
         
         setModalState(MODAL_STATE.UNREGISTERED);
         
